@@ -31,13 +31,7 @@ def _encode_addi_r0(value: int) -> int:
 
 
 def _select_interlaced_mode(modes, target_tv: str):
-    """Select the base interlaced render mode for the requested TV family.
-
-    Some VC builds contain multiple PAL/NTSC render entries, including a
-    progressive PAL entry. Never pick a progressive entry just because it is
-    the first match in the binary. Prefer the canonical interlaced entry and
-    fall back to the first matching interlaced-sized entry only if necessary.
-    """
+    """Select the base interlaced render mode for the requested TV family."""
     base = T.TV_BASE[target_tv]
     exact = [m for m in modes if m["tv"] == base and (m["tv"] & 3) == 0]
     if exact:
@@ -56,24 +50,18 @@ def _select_interlaced_mode(modes, target_tv: str):
 
 
 def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
-    """Locate a PAL runtime height override, if this emulator build has one.
+    """Locate the PAL runtime height override, if present.
 
-    The known PAL VC family loads 574 at runtime and stores it into both the
-    XFB-height field (+8) and VI-height field (+16). For a custom PAL
-    double-strike mode we must keep the XFB at 574 while the VI height is the
-    requested 240/288 value. The runtime VI-height stores are therefore the
-    instructions that must be disabled; the 574 XFB store must remain active.
-
-    Some builds have no such runtime override. Absence is a valid state.
+    The known PAL VC family loads 574 and stores it into both the XFB-height
+    (+8) and VI-height (+16) fields. For a real PAL double-strike mode these
+    runtime stores must both be disabled so the custom render-mode geometry
+    survives unchanged.
     """
     dol = T.Dol(emu)
     pal_va = dol.f2v(pal_mode_off)
     if pal_va is None:
-        return {
-            "ok": False,
-            "present": False,
-            "reason": "Could not map the PAL render mode to a runtime address.",
-        }
+        return {"ok": False, "present": False,
+                "reason": "Could not map the PAL render mode to a runtime address."}
 
     target_hi = (pal_va >> 16) & 0xFFFF
     target_lo = pal_va & 0xFFFF
@@ -115,11 +103,9 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
 
             vi_disabled = all(_u32(emu, r) == 0x60000000 for r in vi_stores)
             xfb_disabled = _u32(emu, xfb_store) == 0x60000000
-            if vi_disabled and not xfb_disabled:
+            if vi_disabled and xfb_disabled:
                 state = "patched"
-            elif xfb_disabled and not vi_disabled:
-                state = "legacy-partial"
-            elif vi_disabled and xfb_disabled:
+            elif xfb_disabled or vi_disabled:
                 state = "partial"
             else:
                 state = "unpatched"
@@ -135,22 +121,17 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
                 "state": state,
             }
 
-    return {
-        "ok": True,
-        "present": False,
-        "reason": "No PAL runtime height override found in this emulator build.",
-        "pal_va": pal_va,
-    }
+    return {"ok": True, "present": False,
+            "reason": "No PAL runtime height override found in this emulator build.",
+            "pal_va": pal_va}
 
 
 def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     """Return patch operations and metadata for the selected CRT mode.
 
-    Supported combinations:
-      NTSC + 240 = 240p/60 Hz
-      NTSC + 288 = experimental 288p/60 Hz
-      PAL  + 240 = experimental 240p/50 Hz
-      PAL  + 288 = experimental 288p/50 Hz
+    NTSC 240p remains the established upstream-style patch.
+    PAL low-resolution modes use the native Wii double-strike geometry:
+    xfbHeight = target_height and viHeight = 2 * target_height.
     """
     if target_tv not in ("NTSC", "PAL"):
         raise ValueError(f"Unsupported target TV mode: {target_tv}")
@@ -170,38 +151,58 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
 
     already_ds = (mode["tv"] & 3) == 1
     ops = []
-    if not already_ds:
-        ops.append((mode["off"], 4, mode["tv"] | 1))
-    if mode["vh"] != target_height:
-        ops.append((mode["off"] + 0x10, 2, target_height))
-    if mode["vfilter"] != T.PROG_VFILTER:
-        for i, value in enumerate(T.PROG_VFILTER):
-            ops.append((mode["off"] + 0x32 + i, 1, value))
 
-    runtime = None
     if target_tv == "PAL":
+        # Native Wii PAL double-strike geometry (e.g. libogc TVPal264Ds):
+        # xfbHeight is the number of displayed low-res lines and viHeight is
+        # exactly twice that value. This is the key difference from the
+        # original NTSC 240p VC patch, which intentionally keeps its 480-line
+        # XFB and uses DF decimation.
+        ops.extend([
+            (mode["off"], 4, mode["tv"] | 1),          # PAL_INT -> PAL_DS
+            (mode["off"] + 0x06, 2, target_height),    # efbHeight
+            (mode["off"] + 0x08, 2, target_height),    # xfbHeight
+            (mode["off"] + 0x0C, 2, (576 - 2 * target_height) // 2),  # viYOrigin
+            (mode["off"] + 0x10, 2, target_height * 2),  # viHeight
+            (mode["off"] + 0x14, 4, 0),                # XFBMODE_SF
+            (mode["off"] + 0x18, 1, 0),                # field_rendering=false
+        ])
+        for i, value in enumerate(T.PROG_VFILTER):
+            if mode["vfilter"][i] != value:
+                ops.append((mode["off"] + 0x32 + i, 1, value))
+
         runtime = inspect_pal_runtime(emu, mode["off"])
         if runtime.get("present"):
-            # Keep the PAL runtime XFB height at 574. That is the full PAL
-            # active-line buffer. Disable only the runtime VI-height writes so
-            # the table's patched 240/288 value survives. This mirrors the
-            # NTSC patch's custom DF relationship (480 XFB -> 240 VI).
-            if runtime["state"] == "legacy-partial":
+            if runtime["state"] == "partial":
                 raise RuntimeError(
-                    "This WAD contains the older experimental PAL runtime patch "
-                    "that disabled the XFB-height store. Repatch the original WAD."
+                    "This WAD contains an older partial PAL runtime patch. "
+                    "Repatch the original unmodified WAD."
                 )
+            # The runtime PAL path writes 574 into both fields. Disable both
+            # stores; otherwise it destroys the low-resolution DS geometry.
             for off in runtime["vi_stores"]:
-                if _u32(emu, off) != 0x60000000:
-                    ops.append((off, 4, 0x60000000))
+                ops.append((off, 4, 0x60000000))
+            ops.append((runtime["xfb_store"], 4, 0x60000000))
 
-    # Remove the one-line field-base offset that causes even/odd line
-    # alternation and heavy flicker in the low-resolution output.
-    ops.append((main[0]["off"], 4, 0x60000000))
+        # No one-line field-base fix here: PAL_DS is single-field output and
+        # uses the same SF geometry as Nintendo's native PAL DS modes.
+        runtime_meta = runtime
+    else:
+        # Keep the established NTSC path and the current experimental NTSC
+        # 288p behavior unchanged.
+        if not already_ds:
+            ops.append((mode["off"], 4, mode["tv"] | 1))
+        if mode["vh"] != target_height:
+            ops.append((mode["off"] + 0x10, 2, target_height))
+        if mode["vfilter"] != T.PROG_VFILTER:
+            for i, value in enumerate(T.PROG_VFILTER):
+                ops.append((mode["off"] + 0x32 + i, 1, value))
+        ops.append((main[0]["off"], 4, 0x60000000))
+        runtime_meta = None
 
     return ops, {
         "mode": mode,
         "already_ds": already_ds,
         "target_height": target_height,
-        "runtime": runtime,
+        "runtime": runtime_meta,
     }
