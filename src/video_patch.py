@@ -41,7 +41,6 @@ def _select_interlaced_mode(modes, target_tv: str):
     base = T.TV_BASE[target_tv]
     exact = [m for m in modes if m["tv"] == base and (m["tv"] & 3) == 0]
     if exact:
-        # Prefer the normal VC framebuffer sizes used by these emulators.
         sized = [m for m in exact if m["efb"] in (480, 528)]
         return sized[0] if sized else exact[0]
 
@@ -59,11 +58,13 @@ def _select_interlaced_mode(modes, target_tv: str):
 def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
     """Locate a PAL runtime height override, if this emulator build has one.
 
-    Different Nintendo VC emulator builds handle PAL height differently. The
-    known family loads 574 and later stores the same runtime value into both VI
-    and XFB-height fields. Some builds (for example tested Mario/1080 variants)
-    have no such override at all. Absence is therefore a valid state, not an
-    error.
+    The known PAL VC family loads 574 at runtime and stores it into both the
+    XFB-height field (+8) and VI-height field (+16). For a custom PAL
+    double-strike mode we must keep the XFB at 574 while the VI height is the
+    requested 240/288 value. The runtime VI-height stores are therefore the
+    instructions that must be disabled; the 574 XFB store must remain active.
+
+    Some builds have no such runtime override. Absence is a valid state.
     """
     dol = T.Dol(emu)
     pal_va = dol.f2v(pal_mode_off)
@@ -77,8 +78,6 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
     target_hi = (pal_va >> 16) & 0xFFFF
     target_lo = pal_va & 0xFFFF
 
-    # Retail PAL builds normally load 574. Patched builds may carry the
-    # requested 288p or 240p height instead.
     for wanted_height in (574, 288, 240):
         for p in range(0, len(emu) - 4, 4):
             if not dol.is_text(p):
@@ -102,28 +101,34 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
             if not found_ptr:
                 continue
 
-            vi_store = None
+            vi_stores = []
             xfb_store = None
             for r in range(p + 4, min(len(emu), p + 96), 4):
                 w2 = _u32(emu, r)
                 if _is_sth_r0(w2, 16):
-                    vi_store = r
+                    vi_stores.append(r)
                 elif _is_sth_r0(w2, 8):
                     xfb_store = r
-                if vi_store is not None and xfb_store is not None:
-                    break
 
-            if vi_store is None or xfb_store is None:
+            if not vi_stores or xfb_store is None:
                 continue
 
-            state = "unpatched" if wanted_height == 574 else (
-                "patched" if _u32(emu, xfb_store) == 0x60000000 else "partial"
-            )
+            vi_disabled = all(_u32(emu, r) == 0x60000000 for r in vi_stores)
+            xfb_disabled = _u32(emu, xfb_store) == 0x60000000
+            if vi_disabled and not xfb_disabled:
+                state = "patched"
+            elif xfb_disabled and not vi_disabled:
+                state = "legacy-partial"
+            elif vi_disabled and xfb_disabled:
+                state = "partial"
+            else:
+                state = "unpatched"
+
             return {
                 "ok": True,
                 "present": True,
                 "li_offset": p,
-                "vi_store": vi_store,
+                "vi_stores": vi_stores,
                 "xfb_store": xfb_store,
                 "current_height": wanted_height,
                 "pal_va": pal_va,
@@ -145,7 +150,7 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
       NTSC + 240 = 240p/60 Hz
       NTSC + 288 = experimental 288p/60 Hz
       PAL  + 240 = experimental 240p/50 Hz
-      PAL  + 288 = 288p/50 Hz
+      PAL  + 288 = experimental 288p/50 Hz
     """
     if target_tv not in ("NTSC", "PAL"):
         raise ValueError(f"Unsupported target TV mode: {target_tv}")
@@ -164,13 +169,12 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
         raise RuntimeError("Could not locate the main VI field-offset instruction.")
 
     already_ds = (mode["tv"] & 3) == 1
-    if already_ds:
-        ops = []
-    else:
-        ops = [
-            (mode["off"], 4, mode["tv"] | 1),
-            (mode["off"] + 0x10, 2, target_height),
-        ]
+    ops = []
+    if not already_ds:
+        ops.append((mode["off"], 4, mode["tv"] | 1))
+    if mode["vh"] != target_height:
+        ops.append((mode["off"] + 0x10, 2, target_height))
+    if mode["vfilter"] != T.PROG_VFILTER:
         for i, value in enumerate(T.PROG_VFILTER):
             ops.append((mode["off"] + 0x32 + i, 1, value))
 
@@ -178,10 +182,18 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     if target_tv == "PAL":
         runtime = inspect_pal_runtime(emu, mode["off"])
         if runtime.get("present"):
-            if runtime["current_height"] != target_height:
-                ops.append((runtime["li_offset"], 4, _encode_addi_r0(target_height)))
-            if _u32(emu, runtime["xfb_store"]) != 0x60000000:
-                ops.append((runtime["xfb_store"], 4, 0x60000000))
+            # Keep the PAL runtime XFB height at 574. That is the full PAL
+            # active-line buffer. Disable only the runtime VI-height writes so
+            # the table's patched 240/288 value survives. This mirrors the
+            # NTSC patch's custom DF relationship (480 XFB -> 240 VI).
+            if runtime["state"] == "legacy-partial":
+                raise RuntimeError(
+                    "This WAD contains the older experimental PAL runtime patch "
+                    "that disabled the XFB-height store. Repatch the original WAD."
+                )
+            for off in runtime["vi_stores"]:
+                if _u32(emu, off) != 0x60000000:
+                    ops.append((off, 4, 0x60000000))
 
     # Remove the one-line field-base offset that causes even/odd line
     # alternation and heavy flicker in the low-resolution output.
