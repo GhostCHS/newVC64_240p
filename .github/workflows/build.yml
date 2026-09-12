@@ -37,10 +37,24 @@ jobs:
           if (-not $exe) { throw 'gzinject.exe was not found in the downloaded archive.' }
           Copy-Item $exe.FullName .\gzinject.exe -Force
 
+      - name: Patch GUI for automatic key and English-only mode
+        shell: pwsh
+        run: |
+          $p = 'src\vc64_240p_gui.py'
+          $s = Get-Content -Raw $p
+          $s = $s.Replace('import vc64tool as T', 'import vc64tool as T`r`nimport key_runtime as K')
+          $s = $s.Replace("self.lang = 'pt'", "self.lang = 'en'")
+          $s = $s.Replace("self.langbtn.pack(side='right')", "self.langbtn.pack(side='right')`r`n        self.langbtn.pack_forget()")
+          $s = $s.Replace("self.keyvar = tk.StringVar(value=os.path.join(app_dir(), 'common-key.bin'))", "self.keyvar = tk.StringVar(value=K.common_key_path())")
+          $s = $s.Replace("        self.keybtn.pack(side='left')", "        self.keybtn.pack(side='left')`r`n        k.pack_forget()")
+          $s = $s.Replace("            key = self.keyvar.get()", "            key = K.common_key_path()")
+          $s = $s.Replace("            key = T.load_key(self.keyvar.get())", "            key = T.load_key(K.common_key_path())")
+          Set-Content -Path $p -Value $s -Encoding utf8 -NoNewline
+
       - name: Build EXE
         shell: cmd
         run: |
-          python -m PyInstaller --noconfirm --onefile --noconsole --clean --name vc64_240p --add-binary "gzinject.exe;." --distpath dist --workpath build\_work --specpath build src\vc64_240p_gui.py
+          python -m PyInstaller --noconfirm --onefile --noconsole --clean --name vc64_240p --add-binary "%CD%\gzinject.exe;." --distpath dist --workpath build\_work --specpath build src\vc64_240p_gui.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
