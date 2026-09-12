@@ -1,6 +1,6 @@
 @echo off
-REM Gera dist\vc64_240p.exe standalone.
-REM Precisa de: Python 3.8+, pip install cryptography pyinstaller
+REM Build dist\vc64_240p.exe as a standalone executable.
+REM Requires: Python 3.8+, pip install cryptography pyinstaller
 cd /d "%~dp0.."
 python -m PyInstaller --noconfirm --onefile --noconsole --clean ^
   --name "vc64_240p" ^
@@ -10,5 +10,5 @@ python -m PyInstaller --noconfirm --onefile --noconsole --clean ^
   --specpath build ^
   src\vc64_240p_gui.py
 echo.
-echo Pronto: dist\vc64_240p.exe
+echo Done: dist\vc64_240p.exe
 pause
