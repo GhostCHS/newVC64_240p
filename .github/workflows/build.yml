@@ -1,0 +1,36 @@
+name: Build vc64_240p
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install cryptography pyinstaller
+
+      - name: Build EXE
+        shell: cmd
+        run: build\build.bat
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: vc64_240p-windows
+          path: dist/vc64_240p.exe
+          if-no-files-found: error
