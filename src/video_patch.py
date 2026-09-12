@@ -1,4 +1,4 @@
-"""Video-mode patch helpers for 240p60 and experimental PAL 288p50."""
+"""Video-mode patch helpers for 240p60/240p50/288p60/288p50."""
 from __future__ import annotations
 
 import struct
@@ -15,17 +15,14 @@ def _opcode(op: int) -> int:
 
 
 def _is_addis_r0(w: int, reg: int) -> bool:
-    # addis reg,r0,imm
     return _opcode(w) == 15 and ((w >> 21) & 0x1F) == reg and ((w >> 16) & 0x1F) == 0
 
 
 def _is_addi_same(w: int, reg: int) -> bool:
-    # addi reg,reg,imm
     return _opcode(w) == 14 and ((w >> 21) & 0x1F) == reg and ((w >> 16) & 0x1F) == reg
 
 
 def _is_sth_r0(w: int, imm: int) -> bool:
-    # sth r0,imm(rA)
     return _opcode(w) == 44 and ((w >> 21) & 0x1F) == 0 and (w & 0xFFFF) == imm
 
 
@@ -34,12 +31,7 @@ def _encode_addi_r0(value: int) -> int:
 
 
 def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
-    """Locate the PAL runtime 574-height override.
-
-    The locator follows the runtime pointer to the PAL render-mode struct rather
-    than relying on a fixed DOL offset. This is intended to work across emulator
-    revisions that keep the same code structure.
-    """
+    """Locate the PAL runtime height override and its XFB-height store."""
     dol = T.Dol(emu)
     pal_va = dol.f2v(pal_mode_off)
     if pal_va is None:
@@ -48,17 +40,15 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
     target_hi = (pal_va >> 16) & 0xFFFF
     target_lo = pal_va & 0xFFFF
 
-    for wanted_height in (574, 288):
+    # Retail PAL builds normally load 574. Patched builds may carry the
+    # requested 288p or 240p height instead. Locate all supported states.
+    for wanted_height in (574, 288, 240):
         for p in range(0, len(emu) - 4, 4):
             if not dol.is_text(p):
                 continue
             if _u32(emu, p) != _encode_addi_r0(wanted_height):
                 continue
 
-            # The PAL pointer construction can straddle the height load:
-            #   addis rX,r0,hi
-            #   addi  rX,rX,lo
-            #   addi  r0,r0,574/288
             found_ptr = False
             for q in range(max(0, p - 96), min(p + 4, len(emu) - 4), 4):
                 w1 = _u32(emu, q)
@@ -106,9 +96,18 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
 
 
 def build_video_ops(emu: bytes, target_tv: str, target_height: int):
-    """Return patch ops and metadata for the selected CRT video mode."""
+    """Return patch operations and metadata for the selected CRT mode.
+
+    Supported combinations:
+      NTSC + 240 = 240p/60 Hz
+      NTSC + 288 = experimental 288p/60 Hz
+      PAL  + 240 = experimental 240p/50 Hz
+      PAL  + 288 = 288p/50 Hz
+    """
     if target_tv not in ("NTSC", "PAL"):
         raise ValueError(f"Unsupported target TV mode: {target_tv}")
+    if target_height not in (240, 288):
+        raise ValueError(f"Unsupported target height: {target_height}")
 
     modes = T.find_render_modes(emu)
     base = T.TV_BASE[target_tv]
@@ -140,8 +139,8 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
         runtime = inspect_pal_runtime(emu, mode["off"])
         if not runtime["ok"]:
             raise RuntimeError(runtime["reason"])
-        if runtime["current_height"] == 574:
-            ops.append((runtime["li_offset"], 4, _encode_addi_r0(288)))
+        if runtime["current_height"] != target_height:
+            ops.append((runtime["li_offset"], 4, _encode_addi_r0(target_height)))
         if _u32(emu, runtime["xfb_store"]) != 0x60000000:
             ops.append((runtime["xfb_store"], 4, 0x60000000))
 
