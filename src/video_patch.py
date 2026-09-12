@@ -30,18 +30,55 @@ def _encode_addi_r0(value: int) -> int:
     return (14 << 26) | (value & 0xFFFF)
 
 
+def _select_interlaced_mode(modes, target_tv: str):
+    """Select the base interlaced render mode for the requested TV family.
+
+    Some VC builds contain multiple PAL/NTSC render entries, including a
+    progressive PAL entry. Never pick a progressive entry just because it is
+    the first match in the binary. Prefer the canonical interlaced entry and
+    fall back to the first matching interlaced-sized entry only if necessary.
+    """
+    base = T.TV_BASE[target_tv]
+    exact = [m for m in modes if m["tv"] == base and (m["tv"] & 3) == 0]
+    if exact:
+        # Prefer the normal VC framebuffer sizes used by these emulators.
+        sized = [m for m in exact if m["efb"] in (480, 528)]
+        return sized[0] if sized else exact[0]
+
+    fallback = [
+        m for m in modes
+        if m["tv"] not in (base + 1, base + 2, base + 3)
+        and (m["tv"] & 3) == 0
+        and m["efb"] in (480, 528)
+    ]
+    if fallback:
+        return fallback[0]
+    return None
+
+
 def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
-    """Locate the PAL runtime height override and its XFB-height store."""
+    """Locate a PAL runtime height override, if this emulator build has one.
+
+    Different Nintendo VC emulator builds handle PAL height differently. The
+    known family loads 574 and later stores the same runtime value into both VI
+    and XFB-height fields. Some builds (for example tested Mario/1080 variants)
+    have no such override at all. Absence is therefore a valid state, not an
+    error.
+    """
     dol = T.Dol(emu)
     pal_va = dol.f2v(pal_mode_off)
     if pal_va is None:
-        return {"ok": False, "reason": "Could not map the PAL render mode to a runtime address."}
+        return {
+            "ok": False,
+            "present": False,
+            "reason": "Could not map the PAL render mode to a runtime address.",
+        }
 
     target_hi = (pal_va >> 16) & 0xFFFF
     target_lo = pal_va & 0xFFFF
 
     # Retail PAL builds normally load 574. Patched builds may carry the
-    # requested 288p or 240p height instead. Locate all supported states.
+    # requested 288p or 240p height instead.
     for wanted_height in (574, 288, 240):
         for p in range(0, len(emu) - 4, 4):
             if not dol.is_text(p):
@@ -84,6 +121,7 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
             )
             return {
                 "ok": True,
+                "present": True,
                 "li_offset": p,
                 "vi_store": vi_store,
                 "xfb_store": xfb_store,
@@ -92,7 +130,12 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
                 "state": state,
             }
 
-    return {"ok": False, "reason": "Could not locate the PAL runtime height override."}
+    return {
+        "ok": True,
+        "present": False,
+        "reason": "No PAL runtime height override found in this emulator build.",
+        "pal_va": pal_va,
+    }
 
 
 def build_video_ops(emu: bytes, target_tv: str, target_height: int):
@@ -110,12 +153,9 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
         raise ValueError(f"Unsupported target height: {target_height}")
 
     modes = T.find_render_modes(emu)
-    base = T.TV_BASE[target_tv]
-    mode = next((m for m in modes if m["tv"] == base), None)
+    mode = _select_interlaced_mode(modes, target_tv)
     if mode is None:
-        mode = next((m for m in modes if m["tv"] == base + 1), None)
-    if mode is None:
-        raise RuntimeError(f"Could not locate the {target_tv} render mode table entry.")
+        raise RuntimeError(f"Could not locate the {target_tv} interlaced render mode table entry.")
 
     dol = T.Dol(emu)
     adds = T.find_field_adds(emu, dol)
@@ -137,14 +177,14 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     runtime = None
     if target_tv == "PAL":
         runtime = inspect_pal_runtime(emu, mode["off"])
-        if not runtime["ok"]:
-            raise RuntimeError(runtime["reason"])
-        if runtime["current_height"] != target_height:
-            ops.append((runtime["li_offset"], 4, _encode_addi_r0(target_height)))
-        if _u32(emu, runtime["xfb_store"]) != 0x60000000:
-            ops.append((runtime["xfb_store"], 4, 0x60000000))
+        if runtime.get("present"):
+            if runtime["current_height"] != target_height:
+                ops.append((runtime["li_offset"], 4, _encode_addi_r0(target_height)))
+            if _u32(emu, runtime["xfb_store"]) != 0x60000000:
+                ops.append((runtime["xfb_store"], 4, 0x60000000))
 
-    # Remove the one-line field-base offset that causes even/odd line alternation.
+    # Remove the one-line field-base offset that causes even/odd line
+    # alternation and heavy flicker in the low-resolution output.
     ops.append((main[0]["off"], 4, 0x60000000))
 
     return ops, {
