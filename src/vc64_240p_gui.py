@@ -1,26 +1,20 @@
 #!/usr/bin/env python3
-"""
-vc64_240p - English standalone GUI for patching Nintendo 64 Virtual Console WADs.
-
-The program patches existing N64 VC WADs. It does not inject ROMs.
-The Wii common key is generated automatically by the standalone Windows build.
-"""
+"""English standalone GUI for patching Nintendo 64 Virtual Console WADs."""
 
 from __future__ import annotations
 
 import os
 import queue
-import sys
 import threading
 import traceback
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, ttk
 
 import key_runtime as K
 import vc64tool as T
 
 APP = "vc64 240p"
-VERSION = "1.0"
+VERSION = "1.1"
 
 BG = "#1e1e22"
 FG = "#e8e8ea"
@@ -29,12 +23,6 @@ GREEN = "#2e7d32"
 RED = "#b3261e"
 AMBER = "#8a6d1f"
 BLUE = "#2f4f7f"
-
-
-def app_dir():
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(sys.executable)
-    return os.path.dirname(os.path.abspath(__file__))
 
 
 class Gui:
@@ -47,22 +35,17 @@ class Gui:
 
         root.title(f"{APP} {VERSION}")
         root.configure(bg=BG)
-        root.geometry("720x650")
-        root.minsize(640, 590)
+        root.geometry("720x700")
+        root.minsize(640, 630)
 
         top = tk.Frame(root, bg=BG)
         top.pack(fill="x", padx=16, pady=(14, 6))
-        tk.Label(
-            top,
-            text=APP,
-            bg=BG,
-            fg=FG,
-            font=("Segoe UI", 17, "bold"),
-        ).pack(side="left")
+        tk.Label(top, text=APP, bg=BG, fg=FG,
+                 font=("Segoe UI", 17, "bold")).pack(side="left")
 
         self.subtitle = tk.Label(
             root,
-            text="Patch an existing N64 Virtual Console WAD to real 240p.",
+            text="Patch an existing N64 Virtual Console WAD to real low-resolution output.",
             bg=BG,
             fg=SUB,
             justify="left",
@@ -95,6 +78,40 @@ class Gui:
             font=("Segoe UI", 9),
         )
         self.file_name.pack(side="left", padx=12, fill="x", expand=True)
+
+        mode_row = tk.Frame(root, bg=BG)
+        mode_row.pack(fill="x", padx=16, pady=(10, 0))
+        tk.Label(
+            mode_row,
+            text="Output mode:",
+            bg=BG,
+            fg=SUB,
+            font=("Segoe UI", 9),
+        ).pack(side="left")
+        self.mode_var = tk.StringVar(value="240p @ 60 Hz (NTSC)")
+        self.mode_box = ttk.Combobox(
+            mode_row,
+            textvariable=self.mode_var,
+            state="readonly",
+            values=("240p @ 60 Hz (NTSC)", "288p @ 50 Hz (PAL, experimental)"),
+            width=29,
+        )
+        self.mode_box.pack(side="left", padx=10)
+        self.mode_box.bind("<<ComboboxSelected>>", self.mode_changed)
+
+        self.mode_hint = tk.Label(
+            root,
+            text=(
+                "240p @ 60 Hz uses the NTSC render mode.\n"
+                "288p @ 50 Hz uses the PAL render mode and is experimental until verified on a PAL CRT."
+            ),
+            bg=BG,
+            fg=SUB,
+            justify="left",
+            anchor="w",
+            font=("Segoe UI", 8),
+        )
+        self.mode_hint.pack(fill="x", padx=16, pady=(2, 0))
 
         self.panel = tk.Frame(root, bg=BG, height=132)
         self.panel.pack(fill="x", padx=16, pady=10)
@@ -152,7 +169,7 @@ class Gui:
 
         self.go_btn = tk.Button(
             root,
-            text="Convert to 240p",
+            text="Apply selected video mode",
             command=self.convert,
             relief="flat",
             font=("Segoe UI", 11, "bold"),
@@ -165,15 +182,8 @@ class Gui:
         self.go_btn.pack(fill="x", padx=16, pady=14)
         self.set_go(False)
 
-        tk.Label(
-            root,
-            text="Log",
-            bg=BG,
-            fg=SUB,
-            anchor="w",
-            font=("Segoe UI", 9),
-        ).pack(fill="x", padx=16)
-
+        tk.Label(root, text="Log", bg=BG, fg=SUB, anchor="w",
+                 font=("Segoe UI", 9)).pack(fill="x", padx=16)
         self.log = tk.Text(
             root,
             height=10,
@@ -187,6 +197,27 @@ class Gui:
         self.log.configure(state="disabled")
 
         self.root.after(100, self.drain)
+
+    def selected_video_mode(self):
+        if self.mode_var.get().startswith("288p"):
+            return "PAL", 288, "288p @ 50 Hz"
+        return "NTSC", 240, "240p @ 60 Hz"
+
+    def mode_changed(self, _event=None):
+        if self.wad:
+            self.analyse()
+
+    def requirement_text(self):
+        tv, _, _ = self.selected_video_mode()
+        if tv == "PAL":
+            return (
+                "Set the Wii to 50 Hz/PAL before launching the patched channel.\n"
+                "The PAL 288p path is experimental and must be tested on real hardware."
+            )
+        return (
+            "Set the Wii to 60 Hz/NTSC before launching the patched channel.\n"
+            "480p/progressive mode is not patched."
+        )
 
     def say(self, msg=""):
         self.log.configure(state="normal")
@@ -232,19 +263,12 @@ class Gui:
         self._go_enabled = enabled
         if enabled:
             self.go_btn.configure(
-                state="normal",
-                bg=GREEN,
-                fg="#ffffff",
-                activebackground="#3a9440",
-                activeforeground="#ffffff",
+                state="normal", bg=GREEN, fg="#ffffff",
+                activebackground="#3a9440", activeforeground="#ffffff",
             )
         else:
-            self.go_btn.configure(
-                state="disabled",
-                bg="#3a3a42",
-                fg="#6e6e78",
-            )
-        self.go_btn.configure(text=text or "Convert to 240p")
+            self.go_btn.configure(state="disabled", bg="#3a3a42", fg="#6e6e78")
+        self.go_btn.configure(text=text or "Apply selected video mode")
 
     def show_verdict(self, colour, header, body, can_go):
         self.panel.configure(bg=colour)
@@ -260,7 +284,8 @@ class Gui:
     def _analyse(self):
         try:
             key_path = K.common_key_path()
-            verdict = T.verdict(self.wad, key_path, "NTSC")
+            target_tv, target_height, target_label = self.selected_video_mode()
+            verdict = T.verdict(self.wad, key_path, target_tv)
             self.state = verdict
 
             if not verdict["ok"]:
@@ -272,22 +297,22 @@ class Gui:
             if not verdict["hashes"]:
                 self.q.put((
                     "verdict",
-                    (RED, "COULD NOT READ THIS WAD", "The WAD hashes do not match its TMD. Refusing to modify it.", False),
+                    (RED, "COULD NOT READ THIS WAD",
+                     "The WAD hashes do not match its TMD. Refusing to modify it.", False),
                 ))
                 return
 
-            status_240 = "CAN BE APPLIED" if verdict["patchable"] else "already applied, nothing to do"
+            patch_status = "CAN BE APPLIED" if verdict["patchable"] else "target not found in this build"
             dark_status = {
                 "can-remove": "CAN BE APPLIED",
                 "already-removed": "already removed, nothing to do",
                 "not-found": "target NOT found in this build",
             }[verdict["dark"]]
-
             info = (
-                f"240p        : {status_240}\n"
-                f"dark filter : {dark_status}\n"
-                f"channel     : {verdict['code']}\n"
-                f"compression : {'LZ77' if verdict['compressed'] else 'raw DOL'}"
+                f"{target_label:15}: {patch_status}\n"
+                f"dark filter     : {dark_status}\n"
+                f"channel         : {verdict['code']}\n"
+                f"compression     : {'LZ77' if verdict['compressed'] else 'raw DOL'}"
             )
 
             self.q.put(("dark", verdict["dark"]))
@@ -296,29 +321,26 @@ class Gui:
             if verdict["patchable"]:
                 self.q.put((
                     "verdict",
-                    (
-                        GREEN,
-                        "THIS WAD ACCEPTS THE 240p PATCH",
-                        info + "\n\nSet the console to 480i before launching the patched channel.",
-                        True,
-                    ),
+                    (GREEN, f"THIS WAD ACCEPTS {target_label.upper()}",
+                     info + "\n\n" + self.requirement_text(), True),
                 ))
             elif can_dark:
                 self.q.put((
                     "verdict",
-                    (AMBER, "ALREADY 240p", info + "\n\nOnly the dark filter can be changed.", True),
+                    (AMBER, f"ONLY DARK FILTER CAN BE CHANGED",
+                     info + "\n\nThe selected video target was not found.", True),
                 ))
                 self.q.put(("onlydark", True))
             else:
                 self.q.put((
                     "verdict",
-                    (AMBER, "ALREADY 240p", info + "\n\nNothing to do for this WAD.", False),
+                    (AMBER, "NO PATCH TARGET FOUND", info + "\n\nNothing to do for this WAD.", False),
                 ))
 
             self.q.put((
                 "log",
                 f"-- {os.path.basename(self.wad)} [{verdict['code']}] "
-                f"{'patchable' if verdict['patchable'] else 'no 240p targets'}",
+                f"target={target_label} {'patchable' if verdict['patchable'] else 'not found'}",
             ))
         except Exception:
             self.q.put((
@@ -327,29 +349,35 @@ class Gui:
             ))
 
     def convert(self):
-        self.q.put(("busy", "Converting..."))
+        self.q.put(("busy", "Applying selected video mode..."))
         threading.Thread(target=self._convert, daemon=True).start()
 
     def _convert(self):
         try:
-            key_path = K.common_key_path()
-            key = T.load_key(key_path)
+            target_tv, target_height, target_label = self.selected_video_mode()
+            key = T.load_key(K.common_key_path())
             wad = T.Wad(self.wad, key)
             index, emulator, _compressed = wad.find_emulator()
-            targets = T.Targets(emulator, "NTSC")
+            targets = T.Targets(emulator, target_tv)
             ops = []
             dark_offset = None
 
             if targets.ok:
-                modes = ", ".join(m["name"] for m in targets.interlaced)
+                mode = targets.mode
                 self.q.put((
                     "log",
-                    f"   render modes: {modes}  @ 0x{targets.mode['off']:06X}; "
+                    f"   render mode: {mode['name']} -> {target_label} @ 0x{mode['off']:06X}; "
                     f"NOP @ 0x{targets.nop:06X}",
                 ))
-                ops = list(targets.patch_ops(every_tv=True))
+                ops = [
+                    (mode["off"], 4, mode["tv"] | 1),
+                    (mode["off"] + 0x10, 2, target_height),
+                ]
+                for i, value in enumerate(T.PROG_VFILTER):
+                    ops.append((mode["off"] + 0x32 + i, 1, value))
+                ops.append((targets.nop, 4, 0x60000000))
             else:
-                self.q.put(("log", "   240p targets not found; the WAD may already be patched."))
+                self.q.put(("log", f"   {target_label} targets not found."))
 
             if self.dark_var.get():
                 offset = T.find_dark_filter(emulator)
@@ -357,26 +385,25 @@ class Gui:
                     self.q.put(("log", "   Dark filter target not found in this build."))
                 else:
                     dark_offset = offset
-                    ops = list(ops) + [(offset, 4, T._BLR)]
+                    ops.append((offset, 4, T._BLR))
                     self.q.put(("log", f"   Dark filter: BLR @ 0x{offset:06X}"))
 
             if not ops:
                 self.q.put(("log", "Nothing to do for this WAD."))
-                self.q.put(("verdict", (AMBER, "ALREADY 240p", "Nothing to do.", False)))
+                self.q.put(("verdict", (AMBER, "NOTHING TO DO", "No selected target or dark-filter change is available.", False)))
                 return
 
             contents = dict(wad.contents)
             contents[index] = T.apply_ops(emulator, ops)
 
             base, ext = os.path.splitext(self.wad)
-            did_240p = bool(targets.ok)
+            did_video = bool(targets.ok)
             did_dark = dark_offset is not None and any(o[0] == dark_offset for o in ops)
-
             suffix = ""
-            if did_240p and not base.lower().rstrip().endswith("240p"):
-                suffix += " 240p"
+            if did_video:
+                suffix += " " + target_label.replace(" @ ", "_").replace(" ", "")
             if did_dark:
-                suffix += " no dark filter"
+                suffix += " no-dark-filter"
 
             output = f"{base}{suffix}{ext}"
             n = 2
@@ -395,12 +422,9 @@ class Gui:
                 f"   Verification: hashes {'OK' if check.sha_ok else 'FAILED'}, "
                 f"{changed:,} emulator bytes changed".replace(",", "."),
             ))
-            self.q.put((
-                "log",
-                f"   Written: {output} ({written:,} bytes)".replace(",", "."),
-            ))
+            self.q.put(("log", f"   Written: {output} ({written:,} bytes)".replace(",", ".")))
             self.q.put(("log", ""))
-            self.q.put(("verdict", (GREEN, "DONE", os.path.basename(output), False)))
+            self.q.put(("verdict", (GREEN, "DONE", f"{target_label}\n{os.path.basename(output)}", False)))
         except SystemExit as exc:
             self.q.put(("log", f"Error: {exc}"))
             self.q.put(("verdict", (RED, "PATCH FAILED", str(exc), False)))
