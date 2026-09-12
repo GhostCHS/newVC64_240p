@@ -1,0 +1,1 @@
+This branch replaces the external key selection with automatic local generation through bundled gzinject.
