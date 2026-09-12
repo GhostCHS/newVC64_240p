@@ -37,6 +37,10 @@ jobs:
           if (-not $exe) { throw 'gzinject.exe was not found in the downloaded archive.' }
           Copy-Item $exe.FullName .\gzinject.exe -Force
 
+      - name: Prepare configurable video-mode GUI
+        shell: pwsh
+        run: python build\prepare_build.py
+
       - name: Build EXE
         shell: cmd
         run: |
