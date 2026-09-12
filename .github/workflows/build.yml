@@ -2,7 +2,7 @@ name: Build vc64_240p
 
 on:
   push:
-    branches: [ main ]
+    branches: [ main, embedded-key-english ]
   workflow_dispatch:
 
 jobs:
@@ -24,9 +24,23 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install cryptography pyinstaller
 
+      - name: Download gzinject
+        shell: pwsh
+        run: |
+          $release = Invoke-RestMethod -Uri 'https://api.github.com/repos/krimtonz/gzinject/releases/latest'
+          $asset = $release.assets | Where-Object { $_.name -match 'win.*64|windows' -and $_.name -match '\.zip$' } | Select-Object -First 1
+          if (-not $asset) { $asset = $release.assets | Where-Object { $_.name -match '\.zip$' } | Select-Object -First 1 }
+          if (-not $asset) { throw 'Could not find a Windows gzinject release asset.' }
+          Invoke-WebRequest -Uri $asset.browser_download_url -OutFile gzinject.zip
+          Expand-Archive gzinject.zip -DestinationPath gzinject_extract -Force
+          $exe = Get-ChildItem gzinject_extract -Recurse -Filter gzinject.exe | Select-Object -First 1
+          if (-not $exe) { throw 'gzinject.exe was not found in the downloaded archive.' }
+          Copy-Item $exe.FullName .\gzinject.exe -Force
+
       - name: Build EXE
         shell: cmd
-        run: build\build.bat
+        run: |
+          python -m PyInstaller --noconfirm --onefile --noconsole --clean --name vc64_240p --add-binary "gzinject.exe;." --distpath dist --workpath build\_work --specpath build src\vc64_240p_gui.py
 
       - name: Upload EXE
         uses: actions/upload-artifact@v4
