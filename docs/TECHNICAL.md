@@ -2,251 +2,271 @@
 
 **English** · [Português](TECNICO.md)
 
-How each target is located, what the WAD looks like inside, and — more useful than any of
-that — **the hypotheses that were wrong**, so nobody has to spend an evening on them again.
+This document describes how the vc64_240p patch locates its targets without relying on fixed offsets, with special attention to the current PAL/NTSC work.
+
+The important design rule is: **do not assume one N64 VC emulator build represents all others.** Pokémon Snap was the starting point for the PAL investigation, but additional retail WADs showed that some runtime details differ between builds.
 
 ---
 
-## 1. The WAD
+## 1. WAD structure
 
-A Wii WAD is: header, cert chain, ticket, TMD, the content blob, footer — each section
-aligned to `0x40`.
+A Wii WAD contains a header, certificate chain, ticket, TMD, encrypted contents and optional footer. Sections are aligned to `0x40`.
 
-- The **title key** is wrapped with the Wii common key, IV = title id + 8 zero bytes.
-- Each **content** is AES-128-CBC with IV = content index as `u16` big endian + 14 zero bytes.
-- The TMD carries each content's size and SHA-1. Change a content and both must be rewritten.
-- Signatures are handled by **trucha / fakesign**: zero the RSA signature, then brute force
-  a padding field until the SHA-1 of the signed blob starts with `0x00`. TMD padding is at
-  `0x1E2`, ticket at `0x1F2`. This is why cIOS 249 (trucha-patched) is required to install.
+For N64 VC channels, the emulator is normally found in content 1, either as a raw DOL or as Nintendo LZ77 (`0x10`) compressed data. The ROM and related resources are normally in the U8 archive in content 5.
 
-For an N64 VC channel:
+The tool validates content SHA-1 values against the TMD before modifying a WAD and rewrites the affected content metadata when it writes the result.
 
-| content | what it is |
+---
+
+## 2. Locating the render-mode table
+
+The N64 VC emulator contains `GXRenderModeObj` structures, each `0x3C` bytes long. The locator identifies them structurally instead of using game-specific offsets.
+
+Useful fields are:
+
+```text
++0x00 viTVmode
++0x04 fbWidth
++0x06 efbHeight
++0x08 xfbHeight
++0x0A viXOrigin
++0x0C viYOrigin
++0x0E viWidth
++0x10 viHeight
++0x14 xFBmode
++0x18 field_rendering
++0x19 aa
++0x1A sample_pattern[24]
++0x32 vfilter[7]
+```
+
+The locator looks for plausible VC render objects including a `fbWidth` of 640, matching EFB/XFB heights, a matching VI height, a valid `viTVmode`, and a seven-tap vfilter whose coefficients sum to 64.
+
+`viTVmode` uses the low two bits for the timing mode:
+
+```text
+0 = interlaced
+1 = double-strike
+2 = progressive
+```
+
+A key lesson from testing is that the emulator may contain NTSC, PAL, MPAL and EURGB60 structures side by side. The console's active video configuration selects which family is used at runtime.
+
+The current patcher therefore selects the requested **interlaced** render structure structurally and avoids accidentally selecting a progressive PAL entry when a build contains several PAL objects.
+
+---
+
+## 3. Automatic PAL / NTSC detection
+
+The GUI determines the WAD's normal video family from the channel metadata rather than from the mere presence of PAL/NTSC render structures in the emulator.
+
+The current mapping is:
+
+```text
+TMD region 0 = Japan  → NTSC family
+TMD region 1 = USA    → NTSC family
+TMD region 2 = Europe/Australia → PAL family
+```
+
+A title-ID suffix fallback is used for unusual/free-region titles.
+
+This distinction matters because a USA WAD can still contain PAL render structures. The presence of a PAL object inside the emulator does not make the title a PAL channel.
+
+Automatic detection only selects the normal default target. The GUI still allows manual selection of all four experimental/established target combinations.
+
+---
+
+## 4. The low-resolution video patch
+
+The original 240p patch is deliberately small. The emulator continues to render using its normal high-resolution framebuffer configuration; the final VI path is changed instead.
+
+The core operations are:
+
+1. Change the selected interlaced `viTVmode` to double-strike.
+2. Change `viHeight` to the target `240` or `288` value.
+3. Replace the vfilter with the progressive profile:
+
+```text
+00 00 15 16 15 00 00
+```
+
+4. NOP the instruction that adds one line to the second VI field base.
+
+The last step is important. Without it, the resulting low-resolution signal alternates between field line sets and exhibits strong flicker.
+
+The patch intentionally leaves the emulator's normal EFB/XFB allocation unchanged. Changing the rendering heights directly was tested and caused either black screens, cropping or zoomed output rather than the desired 2:1 low-resolution image.
+
+---
+
+## 5. Locating the VI field-base offset instruction
+
+The main field-base calculation is not found by searching for literal VI register offsets. The SDK writes those registers through a shadow structure.
+
+A useful structural signature is the framebuffer-register packing code containing four `srwi r0,r0,5` (`0x5400D97E`) instructions at regular spacing.
+
+The relevant helper ultimately contains a pattern equivalent to:
+
+```text
+stw   rS,0(rA)       first field base
+bne   +8
+b     +8
+add   rD,rA,rB       second field = base + one line
+stw   rD,0(rA)
+```
+
+The locator further classifies which occurrence belongs to the main framebuffer by tracing the nearby `+0x30` main-framebuffer structure field.
+
+There can be another occurrence associated with stereoscopic 3D. That path must not be confused with the main framebuffer path.
+
+The patch replaces the one-line `add` with a PowerPC NOP (`0x60000000`).
+
+---
+
+## 6. PAL runtime height handling
+
+This is the main finding from the current PAL investigation.
+
+### Pokémon Snap starting point
+
+The first PAL test was **Pokémon Snap (Germany)**. Its PAL path contains a runtime operation that loads a height of `574` and later stores that value into the VI/XFB-related fields.
+
+That means changing the static PAL render-mode object's height alone is ineffective: the runtime code overwrites it again.
+
+### Additional WAD comparison
+
+The same structural investigation was then run against:
+
+**PAL / Europe**
+
+- Pokémon Snap (Germany)
+- The Legend of Zelda: Ocarina of Time (Europe)
+- Lylat Wars (Europe, Rev 3)
+- Super Mario 64 (Europe)
+
+**NTSC / USA**
+
+- Bomberman Hero (USA)
+- 1080 Snowboarding (USA)
+- Yoshi's Story (USA)
+
+The result was important: the PAL render-mode structures are broadly consistent, but the recognizable `574` runtime height override is **not present in every build**.
+
+In other words, the Pokémon Snap implementation cannot be promoted to a universal fixed PAL assumption.
+
+### Current implementation
+
+The current `video_patch.py` therefore treats the PAL runtime path as optional:
+
+```text
+PAL target selected
+      ↓
+Find PAL interlaced render mode
+      ↓
+Look for PAL runtime height override
+      ↓
+Present?
+ ┌────┴────┐
+ yes       no
+  ↓         ↓
+patch      skip runtime step
+height
+and disable
+XFB store
+```
+
+When the runtime pattern is present, the tool recognizes the known states `574`, `288` and `240`. A `574` value is changed to the requested target height, and the runtime XFB-height store is neutralized so the value cannot immediately be restored.
+
+When no corresponding runtime override is found, that absence is treated as a valid build variant rather than an error. The static PAL render-mode patch is still applied.
+
+This is the principal reason the current PAL implementation is more robust than the original Pokémon-Snap-specific approach.
+
+---
+
+## 7. Selecting the correct PAL/NTSC render object
+
+Some emulator builds contain more than one PAL or NTSC-related object, including progressive variants. A naive `first match` approach can therefore select an object that is never used for the desired path.
+
+The current selector:
+
+1. chooses the exact requested TV family (`NTSC` or `PAL`);
+2. requires the object to be interlaced;
+3. prefers the normal `480`/`528` EFB sizes used by these VC builds;
+4. only falls back to another suitable interlaced structure when the exact canonical object is absent.
+
+This specifically matters for builds such as the tested **Bomberman Hero** variant, which contains multiple PAL render objects including progressive entries.
+
+---
+
+## 8. Dark filter
+
+The optional dark-filter patch is independent of the video-mode patch.
+
+The tool locates the function by its characteristic comparisons against `0xFF`, then walks backwards to the function prologue and writes a `blr` (`0x4E800020`) over that prologue.
+
+A patched function no longer contains its original prologue, so detection checks for both the original prologue and the already-written `blr` state.
+
+---
+
+## 9. Important things that were wrong first
+
+Several plausible approaches were rejected during the investigation:
+
+| Hypothesis | Result |
 |---|---|
-| 0 | banner — **do not touch**, this is what banner-bricks |
-| **1** | **the N64 emulator**, either a raw DOL or LZ77 (type `0x10`) compressed |
-| 2, 3, 4, 6 | shared assets (wwwlib, font, HOME button) |
-| 5 | U8 archive holding the ROM (`rom` or `romc`), save comments, banner TPL |
-| 7 | boot DOL — not the emulator |
+| Set EFB/XFB height directly to 240 | black screen or incorrect scaling/cropping |
+| Use 240-line EFB/XFB and let the emulator solve the rest | zoomed/cropped output |
+| Patch only one NTSC render object | can silently patch an object the console never selects |
+| Select the first PAL object found | unsafe for builds containing multiple PAL variants |
+| Assume every PAL build overwrites height with `574` | disproved by the additional PAL comparison WADs |
+| Use fixed game-specific offsets | offsets differ between emulator revisions |
+| Rely on ROM strings to identify emulator behavior | generic strings can give false conclusions |
 
-When `content1` is compressed, the patched result is stored **decompressed** and not
-recompressed. That is what the gz project does and it works on hardware.
-
----
-
-## 2. Locating the render mode table
-
-The emulator carries a table of `GXRenderModeObj` structs, `0x3C` bytes each, one per TV
-format. Found structurally rather than by offset:
-
-- `fbWidth == 640`
-- `efbHeight == xfbHeight`
-- `viHeight == efbHeight`
-- `viTVmode` is a valid `(format << 2) | mode` value
-- the 7 `vfilter` taps sum to **64**
-
-Field layout:
-
-```
-+0x00 viTVmode     +0x04 fbWidth      +0x06 efbHeight   +0x08 xfbHeight
-+0x0A viXOrigin    +0x0C viYOrigin    +0x0E viWidth     +0x10 viHeight
-+0x14 xFBmode      +0x18 field_rendering                +0x19 aa
-+0x1A sample_pattern[24]               +0x32 vfilter[7]
-```
-
-`viTVmode = (format << 2) | mode`, where mode `0` = INT, `1` = DS (240p), `2` = PROG.
-
-Typical result: seven entries — `NTSC_INT`, `NTSC_PROG`, `MPAL_INT`, `PAL_INT`, `PAL_PROG`
-(twice) and `EURGB60_INT`.
-
-**Every interlaced entry is patched, not just `NTSC_INT`.** Interlaced means the low two bits
-of `viTVmode` are zero. The emulator carries all the formats side by side and picks one at
-runtime from the console's video setting — the WAD has no say in it. Patching only one and
-guessing which is live produced the worst failure this project had: the patch was written
-correctly into a struct nothing reads, and the tool reported success. Writing all of them is
-inert for the formats the console never selects, so it costs nothing and removes the guess.
-
-Progressive entries are deliberately left alone: in 480p there is no interlacing to undo.
-
-**The vfilter must still sum to 64 after patching.** A flat `09 09 0A 0A 0A 09 09` sums to
-66 and is wrong; `00 00 15 16 15 00 00` (the profile from the progressive entry) is correct
-and turns deflicker off.
-
-## 3. Locating the VI field-base `add`
-
-This is the one that matters and the one that is hard.
-
-The VI framebuffer registers (`0xCC002000 + 0x1C..0x28`) **never appear as literal offsets
-in any instruction** — the SDK writes them in a loop from a shadow array. Searching for
-register offsets finds nothing at all.
-
-What works: search for **four consecutive `srwi r0,r0,5` (`0x5400D97E`) spaced 12 bytes
-apart**. That is the four framebuffer registers being packed as `address >> 5`.
-
-From there, `VISetNextFramebuffer` builds a HorVer struct and calls a `calcFbbs` helper with
-five output pointers. The struct semantics, recovered from the caller rather than guessed:
-
-| offset | meaning |
-|---|---|
-| `+0x0A` | field parity (causes a swap) |
-| `+0x20` | double-field flag |
-| `+0x2C` | line unit (`<< 5`) |
-| `+0x30` | main framebuffer |
-| `+0x34`, `+0x38` | **the two field bases** |
-| `+0x44`, `+0x48` | stereoscopic 3D flag and buffer |
-| `+0x4C`, `+0x50` | right-eye versions |
-
-Inside `calcFbbs`, the offset between the two fields is a single instruction:
-
-```
-stw   r9,0(r4)      field 1 = base
-bne   +8            if HorVer[0x20] != 0
-add   r9,r9,r31       field 2 = base + ONE LINE     <-- NOP this
-stw   r9,0(r5)      field 2
-```
-
-The instruction pattern to match: `stw rS,0(rA)` / `bne +8` (`0x40820008`) / `b +8`
-(`0x48000008`) / `add rD,rA,rB` where `rD == rA == rS`.
-
-**It appears twice.** One is the main framebuffer path (preceded by `lwz rX,0x30(rY)`); the
-other belongs to stereoscopic 3D and is **dead code** — its block is skipped when the 3D
-flag is zero, which it always is. Patch the first. Getting this wrong produces a patch that
-changes nothing and looks like the idea does not work.
-
-## 4. Locating the dark filter
-
-The function body compares two bytes against `0xFF`:
-
-```
-lwz    r0,4(r4)      80 04 00 04
-cmpwi  r0,255        2C 00 00 FF
-bne    +0x10         40 82 00 10
-lwz    r0,8(r4)      80 04 00 08
-cmpwi  r0,255        2C 00 00 FF
-```
-
-From there, walk **backwards** to the function prologue `stwu r1,-32(r1)` (`9421FFE0`) and
-write `blr` (`4E800020`) over it.
-
-A detail worth knowing: once patched, the `blr` overwrites the very prologue you searched
-for, so a naive "is the prologue there?" check reports a patched build as *not found*. Look
-for either the prologue or a `blr` and report which.
-
-Confirmed in-game on real hardware (Majora's Mask, PT-BR inject) and located correctly in
-all 8 emulator builds available here.
-
-Method credit: NoobletCheese / Maeson, as implemented in FriishProduce.
+The implementation that survived testing is structural matching plus conservative validation.
 
 ---
 
-## 5. What was wrong first
+## 10. Experimental video modes
 
-Ten dead ends, kept because knowing them is worth more than the working patch.
+The GUI exposes four combinations:
 
-| hypothesis | how it died |
-|---|---|
-| set `efbHeight` 240 and let the display copy downscale | **black screen.** The GX display copy cannot downscale vertically, only upscale. This is a hardware limit, not a bug. |
-| set `efbHeight` = `xfbHeight` = 240 | boots, UI correct, but the game renders **zoomed** — the emulator still draws 480 lines into a 240-line EFB, so it crops instead of shrinking |
-| the `data4` clip box `-640,-480,640,480` is the viewport | patched it; nothing changed |
-| `field_rendering = 1` | nothing changed |
-| inject a call to `GXSetDispCopyYScale(0.5)` | impossible — see the first row; no code injection fixes a hardware limit |
-| turn deflicker **on** to hide the flicker | works, but softens the image. Rejected: blurred 240p loses to sharp 480i |
-| the `+0x48` field pointer is the bottom field | it is the **stereoscopic 3D buffer**, in a block that never executes. Guessed the semantics from the offset instead of tracing the caller |
-| "the emulator never calls `GXSetDispCopyYScale`" | over-generalised from **one** of four display-copy sites. Two of them do read both heights and compute a scale. The empirical results do not change, but do not treat `efb == xfb` as a universal law |
-| the emulator hardcodes its ROM size | Mario Kart 64 and Star Fox 64 (12 MB ROMs) contain **no** `0xC00000` constant anywhere. The size comes from the U8 |
-| the emulator identifies or validates its ROM | no build contains its own ROM's CRC1/CRC2, internal name, cartridge code, the IPL3 CRC table, or a CIC seed table |
+```text
+240p @ 60 Hz (NTSC)  — established/original path
+240p @ 50 Hz (NTSC)  — experimental
+288p @ 60 Hz (PAL)   — experimental
+288p @ 50 Hz (PAL)   — experimental
+```
 
-**The one that worked** was to keep `efb = xfb = 480` — leaving the emulator's rendering
-completely untouched — and do the 2:1 decimation in the **VI** via the double-field stride,
-then remove the one-line offset between the two field bases so they read the same set of
-lines. 240p geometry, full image, zero flicker, no blur.
+The labels are intentionally kept as the project currently uses them. Internally the patch selects the NTSC or PAL timing family associated with the requested output timing.
+
+The code can generate these patches, but **real-hardware validation is still required** for the newer combinations. Successful structural patching is not proof that a particular Wii/CRT combination accepts a given timing.
+
+For a PAL Wii and 15 kHz CRT, `288p @ 50 Hz (PAL)` is currently the principal research target.
 
 ---
 
-## 6. Notes on ROM injection (not implemented here)
+## 11. WAD safety and verification
 
-Kept because it was measured and the conclusions are not obvious.
+Before changing a WAD, the tool verifies that content hashes match the TMD. If they do not, it refuses to modify the WAD.
 
-- **N64 VC emulator builds come in revisions**, and compatibility differs a lot between
-  them. FriishProduce classifies by title id prefix: rev 0 (F-Zero X, Super Mario 64),
-  rev 1 (`NAB`/`NAC`/`NAD` — Star Fox 64, Mario Kart 64, Ocarina of Time), rev 2
-  (`NAK`/`NAJ`/`NAH` — Pokémon Snap, Sin & Punishment, Yoshi's Story), rev 3
-  (`NA3`/`NAE`/`NAP`/`NAU`/`NAY`/`NAZ` — the `romc` ones). **Rev 2 is the most capable.**
-- **Cross-game injection does work** — Kirby 64 into an Ocarina of Time base booted and ran
-  here. But it is **per-game**: the GBAtemp compatibility list reports roughly 70% of ROMs
-  hanging at the Classic Controller screen, and that rate was reproduced here.
-- **No Rareware N64 game was ever released on Wii VC** (Microsoft bought Rare in 2002;
-  Donkey Kong 64 went to the Wii U instead), so no emulator build was ever tuned against a
-  Rare engine. DK64 was tested here on five different bases spanning CIC 6101/6102/6105/6106
-  and 8–32 MB slots: it hangs on all five, roughly 6 seconds after boot, and then spins —
-  an infinite loop, not a crash.
-- The N64 header's game code is at **`0x3C..0x3D`**, not `0x3B`. `0x3B` is the media type.
-  Reading two bytes from `0x3B` collides badly: Mario Kart `NKT` and Kirby `NK4` both become
-  `NK`, and Perfect Dark `NPD` becomes `NP` and stops matching.
-- Read the header **after** converting to z64. Reading it from a `.v64`/`.n64` gives a
-  byte-swapped game code — "Silicon Valley" comes out as `iSiloc naVllye`, code `VS`
-  instead of `SV`.
-- Games that hard-require the 8 MB Expansion Pak: Donkey Kong 64 (`DO`), Majora's Mask
-  (`ZS`), Perfect Dark (`PD`). Others merely use it if present.
-- Searching an emulator for `EEPROM\0` / `SRAM\0` / `FLASH\0` strings **does not** tell you
-  which save chips it implements — that is a generic name table present in every build.
-  Super Mario 64 genuinely uses EEPROM and its own build "fails" that test.
+The output is written as a new file. The input file is not overwritten.
 
-### romc, the compressed rom format
+After writing, the tool reloads the resulting WAD and checks its content hashes again. This catches packaging or encryption mistakes before the user installs the result.
 
-Roughly half the emulator builds open a file called `romc` instead of `rom` — same rom,
-stored compressed. Header, confirmed against retail WADs and gzinject's `romchu.c`:
-
-```
-bytes 0..2   decompressed size / 64, big endian
-byte  3      type
-```
-
-Paper Mario retail reads `0x0A0000 * 64` = 40 MB, Majora's Mask `0x080000 * 64` = 32 MB.
-
-**Retail bases ship type 1 and type 2. No public compressor produces type 2** — Jurai's
-`romc.exe` emits type 1, `romc0.exe` emits type 0 (stored), and `romchu` only decompresses
-type 2. FriishProduce has the same limitation.
-
-**Type 1 works in a type-2 base.** Verified in-game: Bomberman 64 injected with type 1
-romc into the Bomberman Hero and Ogre Battle 64 bases — both type 2 — booted and ran. The
-type byte does not gate the decompressor. This does not appear to be documented anywhere
-else.
-
-Worth doing when writing a romc: decompress your own output with the same tool and compare
-against the input before packing it. A silently wrong romc yields a channel that boots and
-then dies, which is the worst thing to debug.
-
-Two base-specific quirks:
-
-- The **Bomberman Hero** base (`NA3`) will not start unless the rom's cartridge code at
-  `0x3B` reads `NBD`. One byte. FriishProduce does the same.
-- **Compatibility is per game, and the GBAtemp list is right.** Bomberman 64 is listed there
-  as working on the Bomberman Hero and Ogre Battle bases with a "glitchy screen", and that
-  is exactly what it does. It failed on all ten uncompressed-`rom` bases tested here,
-  spanning emulator revisions 0, 1 and 2 and 8–32 MB slots. It also ran on **Mario Party 2**,
-  which that list does not mention.
+The standalone Windows build also generates the Wii common key automatically on first use using the bundled `gzinject` helper, so users do not need to provide a key file manually.
 
 ---
 
-## 7. Verifying a build in Dolphin
+## 12. Testing philosophy
 
-Dolphin runs VC WADs directly (`Dolphin.exe -b -e file.wad`) and installs them to its own
-NAND, which makes it a usable test bench. Some hard-won details:
+The project is intentionally being tested against multiple emulator builds instead of assuming that one retail game is representative.
 
-- A running channel emits `IOS_ES ReadContent` continuously as the emulator streams the ROM
-  from NAND. A hung one drops to near zero. Enable the `IOS_ES` log channel **and set
-  `Verbosity = 4`** — `ReadContent` is INFO level and invisible at NOTICE.
-- **That signal is not a reliable pass/fail on its own.** A working Kirby 64 peaked at 76
-  reads/second while a working Majora's Mask sustained 570. A threshold calibrated on one
-  game will throw away real successes.
-- The 240p patch makes Dolphin render **magenta** — its VI emulation does not handle
-  double-strike. Emulation still runs correctly. Test injection with the patch **off** if
-  you want to see the picture.
-- Dolphin's virtual NAND fills up fast at ~40 MB per channel, and a full NAND makes channels
-  fail in ways that look exactly like a broken patch. Clear
-  `Wii/title/00010001/<id>` between runs.
-- Dolphin's GDB stub (`[General] GDBPort` in `Dolphin.ini`) works with `powerpc-eabi-gdb`.
-  Two traps: it accepts **one** connection, so probing the port with `/dev/tcp` first
-  consumes it and gdb then times out; and `GDBPort` persists in the ini, freezing **every**
-  later boot while it waits for a debugger.
+The seven comparison WADs listed above were chosen specifically to answer whether the structural video targets survive differences in game, region, revision and emulator code layout.
+
+The current conclusions are:
+
+- the render-mode structures are sufficiently consistent to locate structurally;
+- the main framebuffer field-offset code is sufficiently consistent to locate structurally;
+- PAL runtime height handling varies enough that it must be detected conditionally.
+
+That last point is the reason the current PAL patcher does not simply copy Pokémon Snap's runtime assumptions to every game.
+
