@@ -1,122 +1,38 @@
 #!/usr/bin/env python3
 """
-vc64 240p -- janela unica: escolhe uma WAD de Virtual Console de N64, valida se
-ela aceita o patch de 240p, e grava a versao 240p NA MESMA PASTA da original.
+vc64_240p - English standalone GUI for patching Nintendo 64 Virtual Console WADs.
 
-Sem injecao de ROM, sem escolha de base, sem catalogo. So a parte que esta
-provada em hardware real.
+The program patches existing N64 VC WADs. It does not inject ROMs.
+The Wii common key is generated automatically by the standalone Windows build.
 """
+
+from __future__ import annotations
+
 import os
 import queue
 import sys
 import threading
 import traceback
+import tkinter as tk
+from tkinter import filedialog
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[0])))
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import key_runtime as K
+import vc64tool as T
 
-import tkinter as tk                                        # noqa: E402
-from tkinter import filedialog, ttk                         # noqa: E402
+APP = "vc64 240p"
+VERSION = "1.0"
 
-import vc64tool as T                                        # noqa: E402
-
-APP = 'vc64 240p'
-VERSION = '1.0'
-
-L = {
-    'pt': {
-        'pick':      'Escolher WAD...',
-        'nofile':    'Nenhuma WAD escolhida.',
-        'key':       'Chave comum (common-key.bin):',
-        'browse':    'Procurar...',
-        'convert':   'Converter para 240p',
-        'analysing': 'analisando...',
-        'working':   'convertendo...',
-        'log':       'Registro',
-        'dark':      'Remover tambem o filtro escuro (deixa a imagem no brilho original)',
-        'darkno':    'filtro escuro: alvo nao encontrado neste build',
-        'darkdone':  'filtro escuro: ja removido',
-        'okhdr':     'ESTA WAD ACEITA O PATCH DE 240p',
-        'badhdr':    'ESTA WAD NAO ACEITA O PATCH',
-        'donehdr':   'JA ESTA EM 240p',
-        'unreadhdr': 'NAO CONSEGUI LER ESTA WAD',
-        'saved':     'Pronto. Gravado em:',
-        'samefolder': 'A WAD 240p e gravada na mesma pasta da original.',
-        'replaces':  'Ela mantem o mesmo ID de canal, entao ao instalar SUBSTITUI o canal\n'
-                     'original e preserva os saves. O arquivo original nao e alterado.',
-        'need480i':  'Deixe o console em 480i. Em 480p o emulador escolhe outra entrada\n'
-                     'da tabela de video, que nao e patcheada.',
-        'nokey':     'Falta a common-key.bin. Gere uma vez com:  gzinject -a genkey\n'
-                     '(ele pede pra digitar 45e e dar enter -- se voce nao digitar,\n'
-                     'ele gera uma chave ERRADA dizendo que deu certo)',
-        'hashbad':   'Os hashes desta WAD nao batem com o TMD. Recuso mexer nela.',
-        'noemu':     'Nao achei o binario do emulador dentro desta WAD.',
-        'notarget':  'Achei o emulador, mas nao os alvos do patch neste build.',
-        'already':   'Os alvos do 240p nao foram encontrados -- normalmente porque a WAD\n'
-                     'ja esta patcheada. O filtro escuro ainda pode ser removido.',
-        'onlydark':  'JA ESTA EM 240p -- DA PRA REMOVER SO O FILTRO ESCURO',
-        'nothing':   'Nada a fazer nesta WAD: ja esta em 240p e sem filtro escuro.',
-        'convdark':  'Remover o filtro escuro',
-        'l240':      '240p          ',
-        'ldark':     'filtro escuro ',
-        's_ok':      'APLICAVEL',
-        's_done':    'ja aplicado, nada a fazer',
-        's_gone':    'ja removido, nada a fazer',
-        's_no':      'alvo NAO encontrado neste build',
-    },
-    'en': {
-        'pick':      'Choose a WAD...',
-        'nofile':    'No WAD chosen.',
-        'key':       'Wii common key (common-key.bin):',
-        'browse':    'Browse...',
-        'convert':   'Convert to 240p',
-        'analysing': 'analysing...',
-        'working':   'converting...',
-        'log':       'Log',
-        'dark':      'Also remove the dark filter (restores the original brightness)',
-        'darkno':    'dark filter: target not found in this build',
-        'darkdone':  'dark filter: already removed',
-        'okhdr':     'THIS WAD ACCEPTS THE 240p PATCH',
-        'badhdr':    'THIS WAD DOES NOT ACCEPT THE PATCH',
-        'donehdr':   'ALREADY 240p',
-        'unreadhdr': 'COULD NOT READ THIS WAD',
-        'saved':     'Done. Written to:',
-        'samefolder': 'The 240p WAD is written to the same folder as the original.',
-        'replaces':  'It keeps the same channel id, so installing it REPLACES the original\n'
-                     'channel and keeps your saves. The original file is left untouched.',
-        'need480i':  'Set the console to 480i. In 480p the emulator picks a different entry\n'
-                     'in the video mode table, which is not patched.',
-        'nokey':     'common-key.bin is missing. Generate it once with:  gzinject -a genkey\n'
-                     '(it asks you to type 45e and press enter -- if you do not type it,\n'
-                     'it produces a WRONG key while reporting success)',
-        'hashbad':   'This WAD\'s hashes do not match its TMD. Refusing to touch it.',
-        'noemu':     'Could not find the emulator binary inside this WAD.',
-        'notarget':  'Found the emulator, but not the patch targets in this build.',
-        'already':   'The 240p targets were not found, usually because the WAD is already\n'
-                     'patched. The dark filter can still be removed.',
-        'onlydark':  'ALREADY 240p -- THE DARK FILTER CAN STILL BE REMOVED',
-        'nothing':   'Nothing to do: already 240p and the dark filter is already gone.',
-        'convdark':  'Remove the dark filter',
-        'l240':      '240p        ',
-        'ldark':     'dark filter ',
-        's_ok':      'CAN BE APPLIED',
-        's_done':    'already applied, nothing to do',
-        's_gone':    'already removed, nothing to do',
-        's_no':      'target NOT found in this build',
-    },
-}
-
-BG = '#1e1e22'
-FG = '#e8e8ea'
-SUB = '#9a9aa2'
-GREEN = '#2e7d32'
-RED = '#b3261e'
-AMBER = '#8a6d1f'
-BLUE = '#2f4f7f'
+BG = "#1e1e22"
+FG = "#e8e8ea"
+SUB = "#9a9aa2"
+GREEN = "#2e7d32"
+RED = "#b3261e"
+AMBER = "#8a6d1f"
+BLUE = "#2f4f7f"
 
 
 def app_dir():
-    if getattr(sys, 'frozen', False):
+    if getattr(sys, "frozen", False):
         return os.path.dirname(sys.executable)
     return os.path.dirname(os.path.abspath(__file__))
 
@@ -124,305 +40,374 @@ def app_dir():
 class Gui:
     def __init__(self, root):
         self.root = root
-        self.lang = 'pt'
         self.wad = None
         self.state = None
         self.q = queue.Queue()
-        root.title(f'{APP} {VERSION}')
+        self._go_enabled = False
+
+        root.title(f"{APP} {VERSION}")
         root.configure(bg=BG)
-        root.geometry('720x660')
-        root.minsize(640, 600)
+        root.geometry("720x650")
+        root.minsize(640, 590)
 
         top = tk.Frame(root, bg=BG)
-        top.pack(fill='x', padx=16, pady=(14, 6))
-        tk.Label(top, text=APP, bg=BG, fg=FG,
-                 font=('Segoe UI', 17, 'bold')).pack(side='left')
-        self.langbtn = tk.Button(top, text='EN', width=4, relief='flat',
-                                 bg='#33333a', fg=FG, activebackground='#44444c',
-                                 command=self.toggle_lang, cursor='hand2')
-        self.langbtn.pack(side='right')
+        top.pack(fill="x", padx=16, pady=(14, 6))
+        tk.Label(
+            top,
+            text=APP,
+            bg=BG,
+            fg=FG,
+            font=("Segoe UI", 17, "bold"),
+        ).pack(side="left")
 
-        self.sub = tk.Label(root, text='', bg=BG, fg=SUB, justify='left',
-                            font=('Segoe UI', 9))
-        self.sub.pack(fill='x', padx=16, anchor='w')
+        self.subtitle = tk.Label(
+            root,
+            text="Patch an existing N64 Virtual Console WAD to real 240p.",
+            bg=BG,
+            fg=SUB,
+            justify="left",
+            font=("Segoe UI", 9),
+        )
+        self.subtitle.pack(fill="x", padx=16, anchor="w")
 
-        # ---- arquivo
-        f = tk.Frame(root, bg=BG)
-        f.pack(fill='x', padx=16, pady=(14, 4))
-        self.pickbtn = tk.Button(f, text='', command=self.pick, relief='flat',
-                                 bg=BLUE, fg='white', activebackground='#3d6499',
-                                 font=('Segoe UI', 10, 'bold'), padx=14, pady=7,
-                                 cursor='hand2')
-        self.pickbtn.pack(side='left')
-        self.fname = tk.Label(f, text='', bg=BG, fg=SUB, anchor='w',
-                              font=('Segoe UI', 9))
-        self.fname.pack(side='left', padx=12, fill='x', expand=True)
+        file_row = tk.Frame(root, bg=BG)
+        file_row.pack(fill="x", padx=16, pady=(14, 4))
+        self.pick_btn = tk.Button(
+            file_row,
+            text="Choose WAD...",
+            command=self.pick,
+            relief="flat",
+            bg=BLUE,
+            fg="white",
+            activebackground="#3d6499",
+            font=("Segoe UI", 10, "bold"),
+            padx=14,
+            pady=7,
+            cursor="hand2",
+        )
+        self.pick_btn.pack(side="left")
+        self.file_name = tk.Label(
+            file_row,
+            text="No WAD chosen.",
+            bg=BG,
+            fg=SUB,
+            anchor="w",
+            font=("Segoe UI", 9),
+        )
+        self.file_name.pack(side="left", padx=12, fill="x", expand=True)
 
-        # ---- veredito
-        self.panel = tk.Frame(root, bg=BG, height=128)
-        self.panel.pack(fill='x', padx=16, pady=10)
+        self.panel = tk.Frame(root, bg=BG, height=132)
+        self.panel.pack(fill="x", padx=16, pady=10)
         self.panel.pack_propagate(False)
-        self.vhdr = tk.Label(self.panel, text='', bg=BG, fg=FG, anchor='w',
-                             font=('Segoe UI', 11, 'bold'))
-        self.vhdr.pack(fill='x', padx=12, pady=(10, 2))
-        self.vtxt = tk.Label(self.panel, text='', bg=BG, fg=FG, anchor='w',
-                             justify='left', font=('Consolas', 9))
-        self.vtxt.pack(fill='both', padx=12, pady=(0, 8))
+        self.verdict_header = tk.Label(
+            self.panel,
+            text="Choose a WAD to begin.",
+            bg=BG,
+            fg=FG,
+            anchor="w",
+            font=("Segoe UI", 11, "bold"),
+        )
+        self.verdict_header.pack(fill="x", padx=12, pady=(10, 2))
+        self.verdict_text = tk.Label(
+            self.panel,
+            text="",
+            bg=BG,
+            fg=FG,
+            anchor="w",
+            justify="left",
+            font=("Consolas", 9),
+        )
+        self.verdict_text.pack(fill="both", padx=12, pady=(0, 8))
 
-        # Nao ha seletor de formato de TV: o patch grava em NTSC, PAL, MPAL e
-        # EURGB60 de uma vez. Quem escolhe qual e lido e a configuracao do
-        # console, entao pedir isso ao usuario so criava a chance de ele
-        # escolher errado e o patch nao pegar, em silencio.
+        info = tk.Frame(root, bg=BG)
+        info.pack(fill="x", padx=16, pady=(2, 0))
+        tk.Label(
+            info,
+            text=(
+                "The common key is generated automatically on first use.\n"
+                "No key file or key selection is required."
+            ),
+            bg=BG,
+            fg=SUB,
+            justify="left",
+            font=("Segoe UI", 9),
+        ).pack(anchor="w")
 
-        k = tk.Frame(root, bg=BG)
-        k.pack(fill='x', padx=16, pady=(8, 0))
-        self.keylbl = tk.Label(k, text='', bg=BG, fg=SUB, font=('Segoe UI', 9))
-        self.keylbl.pack(side='left')
-        self.keyvar = tk.StringVar(value=os.path.join(app_dir(), 'common-key.bin'))
-        tk.Entry(k, textvariable=self.keyvar, bg='#2a2a30', fg=FG, relief='flat',
-                 insertbackground=FG).pack(side='left', fill='x', expand=True, padx=8)
-        self.keybtn = tk.Button(k, text='...', width=4, relief='flat', bg='#33333a',
-                                fg=FG, command=self.pick_key, cursor='hand2')
-        self.keybtn.pack(side='left')
+        self.dark_var = tk.BooleanVar(value=False)
+        self.dark_box = tk.Checkbutton(
+            root,
+            variable=self.dark_var,
+            text="Also remove the dark filter (restore original brightness)",
+            bg=BG,
+            fg=FG,
+            selectcolor="#2a2a30",
+            activebackground=BG,
+            activeforeground=FG,
+            anchor="w",
+            font=("Segoe UI", 9),
+            state="disabled",
+            disabledforeground="#6e6e78",
+        )
+        self.dark_box.pack(fill="x", padx=14, pady=(12, 0))
 
-        # O tkinter pinta o texto de um botao desabilitado com 'disabledforeground',
-        # que no Windows sai quase da cor do fundo -- verde sobre verde, ilegivel.
-        # Por isso a cor de fundo E a do texto sao trocadas junto com o estado,
-        # sempre pelo set_go() abaixo, nunca por configure(state=...) direto.
-        self.darkvar = tk.BooleanVar(value=False)
-        self.darkbox = tk.Checkbutton(root, variable=self.darkvar, text='', bg=BG, fg=FG,
-                                      selectcolor='#2a2a30', activebackground=BG,
-                                      activeforeground=FG, anchor='w',
-                                      font=('Segoe UI', 9), state='disabled',
-                                      disabledforeground='#6e6e78')
-        self.darkbox.pack(fill='x', padx=14, pady=(10, 0))
-
-        self.gobtn = tk.Button(root, text='', command=self.convert, relief='flat',
-                               font=('Segoe UI', 11, 'bold'), pady=10,
-                               cursor='hand2', bd=0, highlightthickness=0,
-                               disabledforeground='#6e6e78')
-        self.gobtn.pack(fill='x', padx=16, pady=14)
+        self.go_btn = tk.Button(
+            root,
+            text="Convert to 240p",
+            command=self.convert,
+            relief="flat",
+            font=("Segoe UI", 11, "bold"),
+            pady=10,
+            cursor="hand2",
+            bd=0,
+            highlightthickness=0,
+            disabledforeground="#6e6e78",
+        )
+        self.go_btn.pack(fill="x", padx=16, pady=14)
         self.set_go(False)
 
-        self.loglbl = tk.Label(root, text='', bg=BG, fg=SUB, anchor='w',
-                               font=('Segoe UI', 9))
-        self.loglbl.pack(fill='x', padx=16)
-        self.log = tk.Text(root, height=10, bg='#141417', fg='#c9c9d0', relief='flat',
-                           font=('Consolas', 9), wrap='word')
-        self.log.pack(fill='both', expand=True, padx=16, pady=(2, 14))
-        self.log.configure(state='disabled')
+        tk.Label(
+            root,
+            text="Log",
+            bg=BG,
+            fg=SUB,
+            anchor="w",
+            font=("Segoe UI", 9),
+        ).pack(fill="x", padx=16)
 
-        self.retext()
+        self.log = tk.Text(
+            root,
+            height=10,
+            bg="#141417",
+            fg="#c9c9d0",
+            relief="flat",
+            font=("Consolas", 9),
+            wrap="word",
+        )
+        self.log.pack(fill="both", expand=True, padx=16, pady=(2, 14))
+        self.log.configure(state="disabled")
+
         self.root.after(100, self.drain)
 
-    # ------------------------------------------------------------------ i18n
-    def t(self, k):
-        return L[self.lang][k]
-
-    def toggle_lang(self):
-        self.lang = 'en' if self.lang == 'pt' else 'pt'
-        self.langbtn.configure(text='PT' if self.lang == 'en' else 'EN')
-        self.retext()
-        if self.wad:
-            self.analyse()
-
-    def retext(self):
-        self.pickbtn.configure(text=self.t('pick'))
-        self.set_go(getattr(self, '_go_enabled', False))
-        self.keylbl.configure(text=self.t('key'))
-        self.loglbl.configure(text=self.t('log'))
-        self.darkbox.configure(text=self.t('dark'))
-        self.sub.configure(text=self.t('samefolder') + '\n' + self.t('replaces'))
-        if not self.wad:
-            self.fname.configure(text=self.t('nofile'))
-
-    # ------------------------------------------------------------------ log
-    def say(self, msg=''):
-        self.log.configure(state='normal')
-        self.log.insert('end', msg + '\n')
-        self.log.see('end')
-        self.log.configure(state='disabled')
+    def say(self, msg=""):
+        self.log.configure(state="normal")
+        self.log.insert("end", msg + "\n")
+        self.log.see("end")
+        self.log.configure(state="disabled")
 
     def drain(self):
         try:
             while True:
                 kind, payload = self.q.get_nowait()
-                if kind == 'log':
+                if kind == "log":
                     self.say(payload)
-                elif kind == 'verdict':
+                elif kind == "verdict":
                     self.show_verdict(*payload)
-                elif kind == 'onlydark':
-                    self.darkvar.set(True)
-                    self.set_go(True, self.t('convdark'))
-                elif kind == 'dark':
-                    if payload == 'can-remove':
-                        self.darkbox.configure(state='normal', fg=FG)
+                elif kind == "onlydark":
+                    self.dark_var.set(True)
+                    self.set_go(True, "Remove dark filter")
+                elif kind == "dark":
+                    if payload == "can-remove":
+                        self.dark_box.configure(state="normal", fg=FG)
                     else:
-                        self.darkvar.set(False)
-                        self.darkbox.configure(state='disabled')
-                elif kind == 'busy':
+                        self.dark_var.set(False)
+                        self.dark_box.configure(state="disabled")
+                elif kind == "busy":
                     self.set_go(False, payload)
         except queue.Empty:
             pass
         self.root.after(100, self.drain)
 
-    # ------------------------------------------------------------------ ui
     def pick(self):
-        p = filedialog.askopenfilename(title=self.t('pick'),
-                                       filetypes=[('Wii WAD', '*.wad'), ('*', '*')])
-        if not p:
+        path = filedialog.askopenfilename(
+            title="Choose a WAD...",
+            filetypes=[("Wii WAD", "*.wad"), ("All files", "*.*")],
+        )
+        if not path:
             return
-        self.wad = p
-        self.fname.configure(text=os.path.basename(p))
+        self.wad = path
+        self.file_name.configure(text=os.path.basename(path))
         self.analyse()
 
-    def pick_key(self):
-        p = filedialog.askopenfilename(title='common-key.bin',
-                                       filetypes=[('key', '*.bin'), ('*', '*')])
-        if p:
-            self.keyvar.set(p)
-            if self.wad:
-                self.analyse()
-
     def set_go(self, enabled, text=None):
-        """Estado E cores do botao juntos -- ver o comentario onde ele e criado."""
         self._go_enabled = enabled
         if enabled:
-            self.gobtn.configure(state='normal', bg=GREEN, fg='#ffffff',
-                                 activebackground='#3a9440', activeforeground='#ffffff')
+            self.go_btn.configure(
+                state="normal",
+                bg=GREEN,
+                fg="#ffffff",
+                activebackground="#3a9440",
+                activeforeground="#ffffff",
+            )
         else:
-            self.gobtn.configure(state='disabled', bg='#3a3a42', fg='#6e6e78')
-        self.gobtn.configure(text=text if text is not None else self.t('convert'))
+            self.go_btn.configure(
+                state="disabled",
+                bg="#3a3a42",
+                fg="#6e6e78",
+            )
+        self.go_btn.configure(text=text or "Convert to 240p")
 
     def show_verdict(self, colour, header, body, can_go):
         self.panel.configure(bg=colour)
-        self.vhdr.configure(bg=colour, text=header)
-        self.vtxt.configure(bg=colour, text=body)
+        self.verdict_header.configure(bg=colour, text=header)
+        self.verdict_text.configure(bg=colour, text=body)
         self.set_go(can_go)
 
-    # ------------------------------------------------------------------ work
     def analyse(self):
         self.set_go(False)
-        self.show_verdict(BG, self.t('analysing'), '', False)
+        self.show_verdict(BG, "Analysing...", "", False)
         threading.Thread(target=self._analyse, daemon=True).start()
 
     def _analyse(self):
         try:
-            key = self.keyvar.get()
-            if not os.path.exists(key):
-                self.q.put(('verdict', (RED, self.t('unreadhdr'), self.t('nokey'), False)))
+            key_path = K.common_key_path()
+            verdict = T.verdict(self.wad, key_path, "NTSC")
+            self.state = verdict
+
+            if not verdict["ok"]:
+                reason = verdict.get("reason") or "Could not find the emulator binary inside this WAD."
+                self.q.put(("verdict", (RED, "COULD NOT READ THIS WAD", reason, False)))
+                self.q.put(("log", f"-- {os.path.basename(self.wad)}: {reason}"))
                 return
-            v = T.verdict(self.wad, key, 'NTSC')
-            self.state = v
-            if not v['ok']:
-                reason = v.get('reason') or self.t('noemu')
-                self.q.put(('verdict', (RED, self.t('unreadhdr'), reason, False)))
-                self.q.put(('log', f'-- {os.path.basename(self.wad)}: {reason}'))
+
+            if not verdict["hashes"]:
+                self.q.put((
+                    "verdict",
+                    (RED, "COULD NOT READ THIS WAD", "The WAD hashes do not match its TMD. Refusing to modify it.", False),
+                ))
                 return
-            if not v['hashes']:
-                self.q.put(('verdict', (RED, self.t('unreadhdr'), self.t('hashbad'), False)))
-                return
-            # dois patches independentes: dizer o estado de CADA um, senao nao da
-            # pra saber o que o botao vai fazer
-            s240 = self.t('s_ok') if v['patchable'] else self.t('s_done')
-            sdark = {'can-remove': self.t('s_ok'),
-                     'already-removed': self.t('s_gone'),
-                     'not-found': self.t('s_no')}[v['dark']]
-            info = (f"{self.t('l240')}: {s240}\n"
-                    f"{self.t('ldark')}: {sdark}\n"
-                    f"canal {v['code']}   "
-                    f"{'LZ77' if v['compressed'] else 'DOL cru / raw DOL'}")
-            self.q.put(('dark', v['dark']))
-            can_dark = v['dark'] == 'can-remove'
-            if v['patchable']:
-                self.q.put(('verdict', (GREEN, self.t('okhdr'),
-                                        info + '\n' + self.t('need480i'), True)))
+
+            status_240 = "CAN BE APPLIED" if verdict["patchable"] else "already applied, nothing to do"
+            dark_status = {
+                "can-remove": "CAN BE APPLIED",
+                "already-removed": "already removed, nothing to do",
+                "not-found": "target NOT found in this build",
+            }[verdict["dark"]]
+
+            info = (
+                f"240p        : {status_240}\n"
+                f"dark filter : {dark_status}\n"
+                f"channel     : {verdict['code']}\n"
+                f"compression : {'LZ77' if verdict['compressed'] else 'raw DOL'}"
+            )
+
+            self.q.put(("dark", verdict["dark"]))
+            can_dark = verdict["dark"] == "can-remove"
+
+            if verdict["patchable"]:
+                self.q.put((
+                    "verdict",
+                    (
+                        GREEN,
+                        "THIS WAD ACCEPTS THE 240p PATCH",
+                        info + "\n\nSet the console to 480i before launching the patched channel.",
+                        True,
+                    ),
+                ))
             elif can_dark:
-                # ja esta em 240p, mas o filtro escuro continua aplicavel -- deixar seguir
-                self.q.put(('verdict', (AMBER, self.t('onlydark'), info, True)))
-                self.q.put(('onlydark', True))
+                self.q.put((
+                    "verdict",
+                    (AMBER, "ALREADY 240p", info + "\n\nOnly the dark filter can be changed.", True),
+                ))
+                self.q.put(("onlydark", True))
             else:
-                self.q.put(('verdict', (AMBER, self.t('donehdr'),
-                                        info + '\n' + self.t('nothing'), False)))
-            self.q.put(('log', f"-- {os.path.basename(self.wad)}  [{v['code']}]  "
-                               f"{'patchavel / patchable' if v['patchable'] else 'sem alvos / no targets'}"))
+                self.q.put((
+                    "verdict",
+                    (AMBER, "ALREADY 240p", info + "\n\nNothing to do for this WAD.", False),
+                ))
+
+            self.q.put((
+                "log",
+                f"-- {os.path.basename(self.wad)} [{verdict['code']}] "
+                f"{'patchable' if verdict['patchable'] else 'no 240p targets'}",
+            ))
         except Exception:
-            self.q.put(('verdict', (RED, self.t('unreadhdr'),
-                                    traceback.format_exc(limit=1), False)))
+            self.q.put((
+                "verdict",
+                (RED, "COULD NOT READ THIS WAD", traceback.format_exc(limit=1), False),
+            ))
 
     def convert(self):
-        self.q.put(('busy', self.t('working')))
+        self.q.put(("busy", "Converting..."))
         threading.Thread(target=self._convert, daemon=True).start()
 
     def _convert(self):
         try:
-            key = T.load_key(self.keyvar.get())
-            w = T.Wad(self.wad, key)
-            idx, emu, comp = w.find_emulator()
-            t = T.Targets(emu, 'NTSC')
+            key_path = K.common_key_path()
+            key = T.load_key(key_path)
+            wad = T.Wad(self.wad, key)
+            index, emulator, _compressed = wad.find_emulator()
+            targets = T.Targets(emulator, "NTSC")
             ops = []
-            dark_off = None
-            if t.ok:
-                # Todos os formatos entrelacados, nao so o selecionado: quem
-                # escolhe qual struct e lida e a configuracao do console, nao a
-                # WAD. Patchear um formato que o console nao usa e inerte;
-                # patchear so o errado sai em silencio, com o programa dizendo
-                # que deu certo.
-                modos = ', '.join(m['name'] for m in t.interlaced)
-                self.q.put(('log', f"   render mode {modos} @ 0x{t.mode['off']:06X}"
-                                   f"   NOP @ 0x{t.nop:06X}"))
-                ops = list(t.patch_ops(every_tv=True))
+            dark_offset = None
+
+            if targets.ok:
+                modes = ", ".join(m["name"] for m in targets.interlaced)
+                self.q.put((
+                    "log",
+                    f"   render modes: {modes}  @ 0x{targets.mode['off']:06X}; "
+                    f"NOP @ 0x{targets.nop:06X}",
+                ))
+                ops = list(targets.patch_ops(every_tv=True))
             else:
-                self.q.put(('log', '   ' + self.t('already')))
-            if self.darkvar.get():
-                dk = T.find_dark_filter(emu)
-                if dk is None:
-                    self.q.put(('log', '   ' + self.t('darkno')))
+                self.q.put(("log", "   240p targets not found; the WAD may already be patched."))
+
+            if self.dark_var.get():
+                offset = T.find_dark_filter(emulator)
+                if offset is None:
+                    self.q.put(("log", "   Dark filter target not found in this build."))
                 else:
-                    dark_off = dk
-                    ops = list(ops) + [(dk, 4, T._BLR)]
-                    self.q.put(('log', f'   filtro escuro / dark filter: blr @ 0x{dk:06X}'))
+                    dark_offset = offset
+                    ops = list(ops) + [(offset, 4, T._BLR)]
+                    self.q.put(("log", f"   Dark filter: BLR @ 0x{offset:06X}"))
+
             if not ops:
-                self.q.put(('log', self.t('nothing')))
-                self.q.put(('verdict', (AMBER, self.t('donehdr'), self.t('nothing'), False)))
+                self.q.put(("log", "Nothing to do for this WAD."))
+                self.q.put(("verdict", (AMBER, "ALREADY 240p", "Nothing to do.", False)))
                 return
-            contents = dict(w.contents)
-            contents[idx] = T.apply_ops(emu, ops)
 
-            # Nomear pelo que o patch REALMENTE fez, e nao repetir sufixo que ja
-            # esta no nome -- senao reaplicar so o filtro numa WAD ja convertida
-            # produzia "... 240p 240p".
+            contents = dict(wad.contents)
+            contents[index] = T.apply_ops(emulator, ops)
+
             base, ext = os.path.splitext(self.wad)
-            did_240 = bool(t.ok)
-            did_dark = any(o[0] == dark_off for o in ops) if dark_off is not None else False
-            suffix = ''
-            if did_240 and not base.lower().rstrip().endswith('240p'):
-                suffix += ' 240p'
-            if did_dark:
-                suffix += ' sem filtro' if self.lang == 'pt' else ' no dark filter'
-            out = f'{base}{suffix}{ext}'
-            n = 2
-            while os.path.exists(out):
-                out = f'{base}{suffix} ({n}){ext}'
-                n += 1
-            written = w.write(out, title_id=None, contents=contents)
+            did_240p = bool(targets.ok)
+            did_dark = dark_offset is not None and any(o[0] == dark_offset for o in ops)
 
-            # confere o que foi gravado, em vez de confiar
-            chk = T.Wad(out, key)
-            _i2, emu2, _c2 = chk.find_emulator()
-            diff = sum(1 for a, b in zip(emu, emu2) if a != b)
-            self.q.put(('log', f"   verificado: hashes {'OK' if chk.sha_ok else 'FALHOU'}, "
-                               f"{diff} bytes alterados no emulador"))
-            self.q.put(('log', f"{self.t('saved')} {out}  ({written:,} bytes)".replace(',', '.')))
-            self.q.put(('log', ''))
-            self.q.put(('verdict', (GREEN, self.t('saved'), os.path.basename(out), False)))
-        except SystemExit as e:
-            self.q.put(('log', f'erro / error: {e}'))
-            self.q.put(('verdict', (RED, self.t('badhdr'), str(e), False)))
+            suffix = ""
+            if did_240p and not base.lower().rstrip().endswith("240p"):
+                suffix += " 240p"
+            if did_dark:
+                suffix += " no dark filter"
+
+            output = f"{base}{suffix}{ext}"
+            n = 2
+            while os.path.exists(output):
+                output = f"{base}{suffix} ({n}){ext}"
+                n += 1
+
+            written = wad.write(output, title_id=None, contents=contents)
+
+            check = T.Wad(output, key)
+            _, emulator2, _ = check.find_emulator()
+            changed = sum(1 for a, b in zip(emulator, emulator2) if a != b)
+
+            self.q.put((
+                "log",
+                f"   Verification: hashes {'OK' if check.sha_ok else 'FAILED'}, "
+                f"{changed:,} emulator bytes changed".replace(",", "."),
+            ))
+            self.q.put((
+                "log",
+                f"   Written: {output} ({written:,} bytes)".replace(",", "."),
+            ))
+            self.q.put(("log", ""))
+            self.q.put(("verdict", (GREEN, "DONE", os.path.basename(output), False)))
+        except SystemExit as exc:
+            self.q.put(("log", f"Error: {exc}"))
+            self.q.put(("verdict", (RED, "PATCH FAILED", str(exc), False)))
         except Exception:
             tb = traceback.format_exc()
-            self.q.put(('log', tb))
-            self.q.put(('verdict', (RED, self.t('badhdr'), tb.splitlines()[-1], False)))
+            self.q.put(("log", tb))
+            self.q.put(("verdict", (RED, "PATCH FAILED", tb.splitlines()[-1], False)))
 
 
 def main():
@@ -431,5 +416,5 @@ def main():
     root.mainloop()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
