@@ -15,7 +15,7 @@ import vc64tool as T
 import video_patch as VP
 
 APP = "vc64 240p"
-VERSION = "1.2"
+VERSION = "1.3"
 
 BG = "#1e1e22"
 FG = "#e8e8ea"
@@ -32,6 +32,33 @@ MODES = {
     "288p @ 50 Hz (PAL)": ("PAL", 288, True),
 }
 
+AUTO_MODES = {
+    "NTSC": "240p @ 60 Hz (NTSC)",
+    "PAL": "288p @ 50 Hz (PAL)",
+}
+
+
+def detect_wad_tv(wad):
+    """Detect the WAD region and map it to its normal 50/60 Hz family.
+
+    TMD region is preferred because it is part of the signed channel metadata.
+    Title-ID suffix is used as a fallback for unusual/free-region titles.
+    """
+    region_map = {
+        0: ("NTSC", "TMD region: Japan"),
+        1: ("NTSC", "TMD region: USA"),
+        2: ("PAL", "TMD region: Europe/Australia"),
+    }
+    if wad.region in region_map:
+        return region_map[wad.region]
+
+    suffix = wad.code[-1:].upper()
+    if suffix in ("E", "J"):
+        return "NTSC", f"title ID suffix: {suffix}"
+    if suffix in ("P", "D", "F", "S", "I", "U"):
+        return "PAL", f"title ID suffix: {suffix}"
+    return None, "region not determinable"
+
 
 class Gui:
     def __init__(self, root):
@@ -39,11 +66,13 @@ class Gui:
         self.wad = None
         self.state = None
         self.q = queue.Queue()
+        self.mode_manual = False
+        self.detected_tv = None
 
         root.title(f"{APP} {VERSION}")
         root.configure(bg=BG)
-        root.geometry("760x720")
-        root.minsize(680, 650)
+        root.geometry("760x750")
+        root.minsize(680, 680)
 
         top = tk.Frame(root, bg=BG)
         top.pack(fill="x", padx=16, pady=(14, 6))
@@ -98,6 +127,16 @@ class Gui:
         )
         self.mode_box.pack(side="left", padx=10)
         self.mode_box.bind("<<ComboboxSelected>>", self.mode_changed)
+
+        self.detected_label = tk.Label(
+            mode_row,
+            text="Detected source: —",
+            bg=BG,
+            fg=SUB,
+            anchor="w",
+            font=("Segoe UI", 8),
+        )
+        self.detected_label.pack(side="left", padx=(6, 0))
 
         self.mode_hint = tk.Label(
             root,
@@ -190,17 +229,18 @@ class Gui:
 
         self.root.after(100, self.drain)
 
-    def selected_video_mode(self):
-        label = self.mode_var.get()
+    def selected_video_mode(self, label=None):
+        label = label or self.mode_var.get()
         tv, height, experimental = MODES[label]
         return tv, height, label, experimental
 
     def mode_changed(self, _event=None):
+        self.mode_manual = True
         if self.wad:
             self.analyse()
 
-    def requirement_text(self):
-        tv, height, label, experimental = self.selected_video_mode()
+    def requirement_text(self, mode_label=None):
+        tv, height, label, experimental = self.selected_video_mode(mode_label)
         hz = 60 if "60 Hz" in label else 50
         region = "NTSC" if tv == "NTSC" else "PAL"
         text = f"Set the Wii to {hz} Hz / {region} before launching the patched channel."
@@ -231,6 +271,13 @@ class Gui:
                     else:
                         self.dark_var.set(False)
                         self.dark_box.configure(state="disabled")
+                elif kind == "detected":
+                    tv, source, auto_label = payload
+                    self.detected_tv = tv
+                    self.detected_label.configure(text=f"Detected source: {tv} ({source})")
+                    if not self.mode_manual and auto_label:
+                        self.mode_var.set(auto_label)
+                        self.say(f"Auto-detected {tv}; selected {auto_label}.")
                 elif kind == "busy":
                     self.set_go(False, payload)
         except queue.Empty:
@@ -245,6 +292,9 @@ class Gui:
         if not path:
             return
         self.wad = path
+        self.mode_manual = False
+        self.detected_tv = None
+        self.detected_label.configure(text="Detected source: analysing...")
         self.file_name.configure(text=os.path.basename(path))
         self.analyse()
 
@@ -272,7 +322,20 @@ class Gui:
     def _analyse(self):
         try:
             key_path = K.common_key_path()
-            target_tv, target_height, target_label, experimental = self.selected_video_mode()
+            wad_obj = T.Wad(self.wad, T.load_key(key_path))
+            detected_tv, source = detect_wad_tv(wad_obj)
+
+            if detected_tv:
+                auto_label = AUTO_MODES[detected_tv]
+                self.q.put(("detected", (detected_tv, source, auto_label)))
+            else:
+                auto_label = None
+                self.q.put(("detected", (None, source, None)))
+
+            target_label_for_analysis = (
+                auto_label if detected_tv and not self.mode_manual else self.mode_var.get()
+            )
+            target_tv, target_height, target_label, experimental = self.selected_video_mode(target_label_for_analysis)
             verdict = T.verdict(self.wad, key_path, target_tv)
             self.state = verdict
 
@@ -311,7 +374,7 @@ class Gui:
                     header += " [EXPERIMENTAL]"
                 self.q.put((
                     "verdict",
-                    (GREEN, header, info + "\n\n" + self.requirement_text(), True),
+                    (GREEN, header, info + "\n\n" + self.requirement_text(target_label), True),
                 ))
             elif can_dark:
                 self.q.put((
@@ -330,6 +393,7 @@ class Gui:
             self.q.put((
                 "log",
                 f"-- {os.path.basename(self.wad)} [{verdict['code']}] "
+                f"region={detected_tv or 'unknown'} "
                 f"target={target_label} {'available' if verdict['patchable'] else 'not found'}",
             ))
         except Exception:
