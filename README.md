@@ -1,209 +1,86 @@
 # vc64_240p
 
-**Real low-resolution output for Nintendo 64 Virtual Console on the Wii — targeting CRTs.**
+**Real low-resolution output for Nintendo 64 Virtual Console on the Wii — targeting 15 kHz CRTs.**
 
 This project patches the **official Nintendo N64 Virtual Console emulator** inside an existing Wii WAD so that it can output a real progressive low-resolution signal instead of the normal interlaced output.
 
-The original project started as a 240p/60 Hz NTSC patch. It has since been extended into an experimental CRT-oriented video-mode tool with **automatic PAL/NTSC detection**, support for **240p/60, 240p/50, 288p/60 and 288p/50 targets**, and structural analysis of multiple Nintendo N64 VC emulator revisions.
+The project started with a 240p/60 Hz NTSC patch and has been extended into a CRT-oriented video-mode tool with:
 
-The main goal is simple:
+- automatic PAL/NTSC WAD detection
+- 240p/60, 240p/50, 288p/60 and 288p/50 target modes
+- structural detection across different Nintendo N64 VC emulator revisions
+- optional removal of the emulator's dark filter
+- automatic Wii common-key generation in the standalone Windows build
 
-> **Keep Nintendo's original N64 Virtual Console emulator, compatibility work, saves and suspend data — but get the kind of low-resolution progressive output that is useful on a 15 kHz CRT.**
+## Goal
 
-This is especially aimed at Wii setups connected to RGB/component-capable CRT displays where 240p/288p and their native scanline structure are desirable.
+The goal is not to replace Nintendo's emulator with a different N64 emulator.
 
----
+The goal is to keep the things that make Nintendo's N64 Virtual Console useful — its per-title compatibility work, native save handling and suspend data — while changing the final video path so that a Wii connected to a 15 kHz CRT can produce the kind of progressive low-resolution signal associated with original consoles.
 
-## Why this exists
-
-Nintendo's N64 Virtual Console normally renders internally at a high-resolution framebuffer and outputs an interlaced signal. Unlike the older 2D Virtual Console systems, N64 VC does not normally expose the low-resolution progressive signal expected from an original console.
-
-For CRT users, the difference matters. A real progressive low-resolution signal gives stable scanlines and avoids the characteristic field-to-field flicker of interlaced output.
-
-The obvious alternatives each have drawbacks:
-
-| route | problem |
-|---|---|
-| Wii N64 homebrew emulators | 240p is possible, but compatibility and performance can vary substantially by game |
-| Wii U / vWii | does not provide the same 240p workflow as a real Wii CRT setup |
-| replacing the Nintendo emulator | loses Nintendo's original per-title compatibility work and data handling |
-| forcing a display mode only | does not help if the emulator itself continues to configure an interlaced render path |
-
-So this project modifies the emulator itself.
+For a PAL Wii/CRT setup, the primary experimental target is **288p @ 50 Hz (PAL)**. The original **240p @ 60 Hz (NTSC)** path remains the established starting point. The other combinations are research targets and must be validated on real hardware.
 
 ---
 
-## What it does
+## What the tool does
 
-The current tool can target four video combinations:
+The GUI patches an **existing N64 Virtual Console WAD**. It does not need to inject a ROM in order to perform the video patch.
 
-| target | status |
+The four selectable target combinations are:
+
+| Target | Status |
 |---|---|
 | **240p @ 60 Hz (NTSC)** | established/original path |
 | **240p @ 50 Hz (NTSC)** | experimental |
 | **288p @ 60 Hz (PAL)** | experimental |
 | **288p @ 50 Hz (PAL)** | experimental |
 
-The labels above are retained in the GUI because they describe the requested output combinations. Internally the patch selects the NTSC or PAL render path according to the target's timing family.
+The parenthetical labels are retained in the GUI as the project's target naming. Internally, the patch selects the NTSC or PAL render/timing family required for the requested output.
 
-For a normal **PAL Wii connected to a 15 kHz CRT**, the most relevant experimental target is currently **288p @ 50 Hz (PAL)**.
+### Automatic region detection
 
-The project does **not** claim that all four combinations are electrically or temporally validated on every CRT. The non-original combinations are deliberately marked experimental and require real-hardware testing.
-
----
-
-## Automatic PAL / NTSC detection
-
-The GUI now analyses the selected WAD and determines its normal video family automatically.
-
-Detection prefers the **TMD region metadata** carried by the channel:
+When a WAD is opened, the GUI detects the channel's normal video family automatically from its TMD region metadata:
 
 - Japan / USA → NTSC family
 - Europe / Australia → PAL family
 
-For unusual/free-region titles, the tool has a title-ID fallback.
+For unusual/free-region titles, a title-ID suffix fallback is used.
 
-The automatic selection is a convenience only. The four target modes remain manually selectable.
+The automatic selection is only a default. All four targets remain manually selectable for testing.
 
-This distinction is important because a VC emulator can contain several render-mode structures at the same time. The fact that a PAL structure exists inside a USA WAD does **not** make the WAD a PAL title; the channel's region and the console video system determine which family is normally used.
-
----
-
-## PAL support is experimental and structural
-
-Early work on PAL was based on Pokémon Snap and found a runtime code path that overwrote the PAL height with **574**. That meant changing only the PAL render-mode table was ineffective.
-
-Testing against additional retail PAL and NTSC WADs showed that this runtime pattern is **not identical in every emulator build**. For example, some tested games contain the recognizable PAL runtime height override while others do not, even though their PAL render-mode structures are present.
-
-The current patcher therefore does **not** assume that every PAL emulator must contain the Pokémon Snap-style `574` sequence.
-
-Instead it works like this:
-
-```text
-WAD
- ↓
-Detect NTSC/PAL family
- ↓
-Find the correct interlaced render-mode structure structurally
- ↓
-Find the main framebuffer field-offset instruction structurally
- ↓
-For PAL:
-    if a PAL runtime height override exists:
-        patch it
-        disable the runtime XFB-height store
-    otherwise:
-        skip that optional step
- ↓
-Patch the render path
- ↓
-Verify the resulting WAD
-```
-
-This is important for portability across different official Nintendo emulator builds.
-
-### Why structural matching?
-
-The emulator offsets differ between games and revisions. Hardcoding an address taken from one WAD is therefore unsafe.
-
-The tool searches for the actual structures and instruction patterns it needs. When a required target cannot be located, the tool refuses to modify the WAD instead of silently writing to an unrelated address.
+A crucial distinction is that an emulator binary can contain NTSC, PAL, MPAL and EURGB60 render structures at the same time. The presence of a PAL structure inside a USA WAD does not make that WAD a PAL title.
 
 ---
 
-## What is actually patched
+## Why the patch is structural
 
-The original 240p path changes the Nintendo emulator's video configuration rather than replacing the emulator.
+The N64 VC emulator is not identical in every game, revision or injected channel. Fixed offsets taken from one WAD are therefore unsafe.
 
-The core changes are:
+The patcher searches for the actual render-mode structures and PowerPC instruction patterns it needs. It refuses to modify a WAD when a required target cannot be located instead of silently writing to an unrelated address.
 
-| change | purpose |
-|---|---|
-| `viTVmode` interlaced → double-strike | selects progressive low-resolution output |
-| `viHeight` → target height | selects 240 or 288 output lines |
-| progressive video filter profile | removes the normal interlace-oriented deflicker filtering |
-| field-base offset instruction → NOP | prevents the even/odd field alternation that otherwise causes heavy flicker |
-| PAL runtime height override, where present | prevents the PAL path from replacing the requested height at runtime |
-| PAL runtime XFB-height store, where present | prevents the runtime code from restoring the original high-resolution XFB height |
+The core video work keeps the emulator's normal rendering path intact and changes the VI/display configuration needed for progressive low-resolution output.
 
-The emulator's normal framebuffer allocation is intentionally preserved. The objective is to change the final video path without replacing Nintendo's game/emulator logic.
+The main changes are:
 
-### Dark filter removal
+1. interlaced `viTVmode` → double-strike
+2. `viHeight` → the selected 240/288 target height
+3. progressive vfilter profile to remove interlace-oriented deflicker
+4. NOP of the one-line field-base offset that otherwise causes heavy field-to-field flicker
+5. PAL runtime-height handling, when a given emulator build actually contains it
 
-The GUI also contains an optional patch for the emulator's darkening function. When available, the patch makes that function return immediately.
+The optional dark-filter patch is separate and simply disables the emulator function responsible for global image darkening.
 
-This is separate from the video-mode patch and can be applied independently.
+See **[docs/TECHNICAL.md](docs/TECHNICAL.md)** for the structural signatures and the investigation history.
 
 ---
 
-## What it is not
+## PAL support: what we learned
 
-**The GUI is not primarily a ROM injector.** It is designed to patch an **existing N64 VC WAD** — either an official retail channel or an injected channel that already uses a compatible Nintendo N64 VC emulator build.
+The PAL work did **not** turn out to be identical across all tested WADs.
 
-For building channels from ROMs, [FriishProduce](https://github.com/CatmanFan/FriishProduce) remains the preferred injector. The two tools have different jobs:
+The first PAL investigation used **Pokémon Snap (Germany)** and found a runtime path that overwrote the PAL height with `574`. Patching only the PAL render-mode table therefore did not work.
 
-- **FriishProduce** builds/injects the channel.
-- **vc64_240p** modifies the resulting emulator video path for CRT output.
-
-The CLI in this repository contains experimental injection and `romc` support, but that is not the main purpose of the GUI.
-
----
-
-## Usage
-
-1. Run `vc64_240p.exe`.
-2. Choose an N64 VC WAD.
-3. The tool reads the WAD and automatically reports the detected NTSC/PAL family.
-4. The normal mode is selected automatically:
-   - NTSC → `240p @ 60 Hz (NTSC)`
-   - PAL → `288p @ 50 Hz (PAL)`
-5. Select another target manually when testing a different combination.
-6. Optionally enable the dark-filter removal.
-7. Apply the patch.
-8. The output is written beside the original WAD. The original file is not modified.
-
-The generated WAD keeps the original channel identity. As with any modified WAD, use a recovery method such as Priiloader when experimenting.
-
----
-
-## Requirements
-
-For the standalone Windows build:
-
-- Windows
-- An N64 Virtual Console WAD
-- A Wii capable of installing/testing the resulting channel
-- A CRT setup capable of accepting the requested low-resolution signal
-
-The standalone build generates the Wii common key automatically on first use. No manual `common-key.bin` file is required.
-
-For source builds:
-
-- Python 3.8+
-- `cryptography`
-- `pyinstaller`
-
----
-
-## Important Wii / CRT requirements
-
-The patched channel does not magically override the Wii's complete video configuration. The Wii must be configured for the timing family that the patched target expects.
-
-For example:
-
-- 240p/60 targets require the Wii to be operating in a 60 Hz family.
-- 288p/50 targets require the Wii to be operating in a 50 Hz PAL family.
-
-The GUI displays the corresponding requirement for the selected target.
-
-The experimental 240p/50 and 288p/60 combinations are research targets. They should be treated as tests, not as established standards for every Wii and CRT.
-
----
-
-## Testing and current state
-
-This project is actively being validated against multiple N64 Virtual Console WADs and emulator revisions rather than assuming that one game represents every build.
-
-During the current PAL/NTSC work, the following retail WADs were used as structural comparison samples:
+We then compared additional retail WADs from both regions:
 
 ### PAL / Europe
 
@@ -218,29 +95,114 @@ During the current PAL/NTSC work, the following retail WADs were used as structu
 - 1080 Snowboarding (USA)
 - Yoshi's Story (USA)
 
-These comparisons showed that the basic render-mode layout is remarkably consistent, while the PAL runtime height-handling code is **not** identical across every emulator build. That finding directly led to the current optional PAL-runtime patching logic.
+The important finding was that the **basic render-mode structure is highly consistent**, while the **PAL runtime height-handling code is not**. Some builds contain the recognizable `574` runtime sequence; others have no equivalent override even though their PAL render structures are present.
 
-### What is established vs experimental
+The current patcher therefore treats the PAL runtime override as **optional**:
 
-The original 240p/60 NTSC approach is the established path of this project.
+```text
+WAD
+ ↓
+Detect NTSC/PAL family
+ ↓
+Find the requested interlaced render-mode structure
+ ↓
+Find the main framebuffer field-offset instruction
+ ↓
+PAL only:
+    runtime height override present?
+       yes → patch requested height and disable runtime XFB-height store
+       no  → skip that optional step
+ ↓
+Apply video patch
+ ↓
+Write and verify the resulting WAD
+```
 
-The newer PAL work is explicitly experimental. In particular, the current code has been designed to **locate and patch** PAL runtime handling safely across multiple WADs, but that does not by itself prove that every target combination works correctly on every real Wii and CRT.
-
-Real-hardware reports are therefore important. A useful report should include:
-
-- game / WAD region and revision
-- selected target mode
-- Wii video setting
-- CRT / display type
-- whether the channel booted
-- whether the signal was actually 240p/288p
-- whether the image had incorrect colors, geometry, flicker or instability
+This avoids making Pokémon Snap's implementation a hardcoded assumption for every N64 VC build.
 
 ---
 
-## Why there are no useful before/after screenshots
+## Important experimental status
 
-A screenshot is a poor way to demonstrate the change from interlaced output to progressive low-resolution CRT output. The key difference is temporal: 480i flicker exists between fields, while the benefit of 240p/288p is the stable scanline structure and progressive timing of the signal.
+The code can **locate and patch** several low-resolution target combinations, but that is not the same as proving that every combination is electrically or temporally valid on every Wii and CRT.
+
+Current status should therefore be understood as:
+
+- **240p @ 60 Hz (NTSC):** established project path.
+- **288p @ 50 Hz (PAL):** main experimental target for PAL Wii/CRT testing.
+- **240p @ 50 Hz:** experimental.
+- **288p @ 60 Hz:** experimental.
+
+Real-hardware testing is required, especially for the latter three modes.
+
+Useful test reports should state the game/WAD region and revision, selected target mode, Wii video setting, CRT/display, whether the channel boots, whether the signal is actually 240p/288p, and whether there are color, geometry, flicker or stability problems.
+
+---
+
+## What it is not
+
+The GUI is **not primarily a ROM injector**. It is designed to patch an existing N64 VC WAD: an official retail channel or an injected channel that already uses a compatible Nintendo N64 VC emulator build.
+
+For building a channel from a ROM, **[FriishProduce](https://github.com/CatmanFan/FriishProduce)** remains the preferred injector. The intended workflow is:
+
+```text
+ROM
+ ↓
+FriishProduce
+ ↓
+N64 VC WAD
+ ↓
+vc64_240p
+ ↓
+CRT-oriented video patch
+```
+
+The repository's CLI contains experimental injection/`romc` functionality, but that is not the main purpose of the GUI.
+
+---
+
+## Usage
+
+1. Run `vc64_240p.exe`.
+2. Choose an N64 VC WAD.
+3. The tool verifies the WAD content hashes and detects its normal NTSC/PAL family.
+4. A default target is selected automatically:
+   - NTSC → **240p @ 60 Hz (NTSC)**
+   - PAL → **288p @ 50 Hz (PAL)**
+5. Select another target manually when testing a different timing combination.
+6. Optionally enable dark-filter removal.
+7. Apply the patch.
+8. A new WAD is written beside the original; the input WAD is left untouched.
+
+The standalone build generates the Wii common key automatically on first use. No manual `common-key.bin` file is required.
+
+### Wii / CRT setup
+
+The Wii must be configured for the timing family expected by the selected target. For example, a 240p/60 target requires a 60 Hz family, while 288p/50 requires the PAL 50 Hz family. The GUI displays the corresponding requirement.
+
+A recovery method such as **Priiloader** is strongly recommended when installing and testing modified WADs.
+
+---
+
+## Testing philosophy
+
+This project deliberately tests multiple emulator builds instead of assuming that one retail game represents the whole N64 VC library.
+
+The comparison WADs above were used to separate three different questions:
+
+1. Is the render-mode layout consistent enough to find structurally?
+2. Is the main framebuffer field-offset code consistent enough to patch structurally?
+3. Is PAL runtime height handling identical across builds?
+
+The answer so far is effectively **yes, yes, no**.
+
+That is why the implementation does not use a Pokémon-Snap-specific PAL offset and why the PAL runtime step is conditional.
+
+---
+
+## Screenshots and CRT output
+
+A normal screenshot is not a useful demonstration of the change from 480i to 240p/288p on a CRT. The important differences are temporal and signal-level: interlaced field flicker versus stable progressive scanlines.
 
 Real hardware is the meaningful test target.
 
@@ -248,22 +210,26 @@ Real hardware is the meaningful test target.
 
 ## Building
 
-The repository contains a GitHub Actions workflow that builds the standalone Windows executable.
+The repository contains a GitHub Actions workflow that produces a standalone Windows executable:
 
-A local build can be produced with the project's normal build scripts and dependencies.
+```text
+vc64_240p.exe
+```
 
-The resulting artifact is a standalone `vc64_240p.exe`.
+The workflow downloads `gzinject.exe` at build time and bundles it into the standalone application so that common-key generation works automatically.
+
+For a local source build, use Python 3.8+ with `cryptography` and `pyinstaller`.
 
 ---
 
 ## Credits
 
-- **BirdonWheels** — demonstrated on r/crtgaming in 2026 that low-resolution N64 VC output was possible by patching Nintendo's emulator.
+- **BirdonWheels** — demonstrated low-resolution N64 VC output by patching Nintendo's emulator.
 - **NoobletCheese / Maeson** — dark-filter removal method.
-- **[FriishProduce](https://github.com/CatmanFan/FriishProduce)** — injection workflow and related emulator research.
+- **[FriishProduce](https://github.com/CatmanFan/FriishProduce)** — N64 VC injection workflow and related emulator research.
 - **[gzinject](https://github.com/PracticeROM/gzinject)** (KrimtonZ) — WAD handling reference and common-key generation.
 
-This repository extends the original 240p work with structural PAL/NTSC analysis, automatic region selection, and experimental multi-timing support.
+This repository extends the original 240p work with structural PAL/NTSC analysis, automatic region selection and experimental multi-timing support.
 
 ## License
 
