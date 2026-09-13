@@ -30,18 +30,6 @@ def _encode_addi_r0(value: int) -> int:
     return (14 << 26) | (value & 0xFFFF)
 
 
-def _encode_addi(reg: int, value: int) -> int:
-    return (14 << 26) | ((reg & 0x1F) << 21) | (value & 0xFFFF)
-
-
-def _encode_sth(rs: int, ra: int, imm: int) -> int:
-    return (44 << 26) | ((rs & 0x1F) << 21) | ((ra & 0x1F) << 16) | (imm & 0xFFFF)
-
-
-def _encode_subfic_r3_r0(value: int) -> int:
-    return (8 << 26) | (3 << 21) | (value & 0xFFFF)
-
-
 def _select_interlaced_mode(modes, target_tv: str):
     """Select the base interlaced render mode for the requested TV family."""
     base = T.TV_BASE[target_tv]
@@ -159,41 +147,17 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
 
     if target_tv == "PAL" and target_height == 288:
         runtime = inspect_pal_runtime(emu, mode["off"])
-        if not runtime.get("present"):
-            raise RuntimeError("Could not locate the PAL runtime height override for this emulator build.")
-        if runtime["state"] in ("legacy-partial", "partial"):
-            raise RuntimeError("This WAD contains an older experimental PAL runtime patch. Repatch the original WAD.")
-
-        li_off = runtime["li_offset"]
-        xfb_store = runtime["xfb_store"]
-        calc_off = li_off + 0x3C
-        if _u32(emu, li_off) != _encode_addi_r0(574):
-            raise RuntimeError("PAL runtime height load signature changed; refusing to patch blindly.")
-        if _u32(emu, xfb_store - 4) != 0x806D8AE0:
-            raise RuntimeError("PAL runtime XFB pointer reload signature changed; refusing to patch blindly.")
-        if _u32(emu, xfb_store) != 0xB0030008:
-            raise RuntimeError("PAL runtime XFB-height store signature changed; refusing to patch blindly.")
-        if _u32(emu, calc_off) != _encode_subfic_r3_r0(574):
-            raise RuntimeError("PAL runtime height calculation signature changed; refusing to patch blindly.")
-
         return [
             (mode["off"], 4, mode["tv"] | 1),
             (mode["off"] + 0x14, 4, 0),
             (main[0]["off"], 4, 0x60000000),
-            (xfb_store - 4, 4, _encode_addi(12, 287)),
-            (xfb_store, 4, _encode_sth(12, 3, 8)),
         ], {
             "mode": mode,
             "already_ds": (mode["tv"] & 3) == 1,
             "target_height": target_height,
             "runtime": runtime,
-            "controlled_runtime_test": True,
-            "runtime_height": 574,
-            "runtime_xfb_height": 287,
-            "runtime_vi_height": 574,
+            "controlled_field_test": True,
             "single_field_xfb": True,
-            "progressive_vfilter": False,
-            "half_height_xfb": True,
         }
 
     already_ds = (mode["tv"] & 3) == 1
