@@ -2,7 +2,7 @@ name: Build vc64_240p
 
 on:
   push:
-    branches: [ main, embedded-key-english, pal288-ds-experiment, pal-ds-single-change ]
+    branches: [ main, embedded-key-english, pal288-ds-experiment, pal-ds-single-change, pal288-vi576-test ]
   workflow_dispatch:
 
 jobs:
