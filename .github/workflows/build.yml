@@ -3,6 +3,8 @@ name: Build vc64_240p
 on:
   push:
     branches: [ main, embedded-key-english, pal288-ds-experiment, pal-ds-single-change, pal288-native-mode-test ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
