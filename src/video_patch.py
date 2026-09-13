@@ -125,9 +125,12 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
 def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     """Return patch operations for the selected CRT mode.
 
-    PAL 288p is a controlled experiment. The current test keeps the
-    emulator's PAL framebuffer geometry untouched and changes only the
-    display-mode/field handling needed to produce stable low-resolution output.
+    PAL 288p uses the native PAL 288p single-field geometry documented by
+    libogc2/Wii64: PAL double-strike, 240-line EFB, 288-line XFB and a 576-line
+    VI window. The VC PAL startup path later overwrites EFB to 480, so the
+    critical runtime relationship is VI=576 and XFB=288. Unlike the NTSC 240p
+    DF path, this mode intentionally keeps the main field-base calculation
+    intact because 576 == 2 * 288 enables the second VI field.
     """
     if target_tv not in ("NTSC", "PAL"):
         raise ValueError(f"Unsupported target TV mode: {target_tv}")
@@ -147,17 +150,45 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
 
     if target_tv == "PAL" and target_height == 288:
         runtime = inspect_pal_runtime(emu, mode["off"])
-        return [
-            (mode["off"], 4, mode["tv"] | 1),
-            (mode["off"] + 0x14, 4, 0),
-            (main[0]["off"], 4, 0x60000000),
-        ], {
+        if runtime.get("present") and runtime.get("state") in ("patched", "partial", "legacy-partial"):
+            raise RuntimeError(
+                "This WAD contains an existing experimental PAL runtime patch. "
+                "Repatch the original WAD."
+            )
+
+        ops = [
+            # Static object: match the libogc2 TVPal288DsScale geometry.
+            (mode["off"], 4, mode["tv"] | 1),       # PAL_INT -> PAL_DS
+            (mode["off"] + 0x06, 2, 240),            # EFB height
+            (mode["off"] + 0x08, 2, 288),            # XFB height
+            (mode["off"] + 0x10, 2, 576),            # VI height
+            (mode["off"] + 0x14, 4, 0),             # XFBMODE SF
+            (mode["off"] + 0x18, 1, 0),             # field_rendering = false
+            (mode["off"] + 0x19, 1, 0),             # AA disabled (Scale variant)
+        ]
+        for i, value in enumerate(T.PROG_VFILTER):
+            ops.append((mode["off"] + 0x32 + i, 1, value))
+
+        if runtime.get("present"):
+            # The PAL VC startup loads 574 once and stores it into both
+            # viHeight (+0x10) and xfbHeight (+0x08). Make the VI 576 lines,
+            # then neutralize only the XFB-height store so the static 288
+            # remains in force. This produces the required 576:288 ratio.
+            li = runtime["li_offset"]
+            ops.append((li, 4, _encode_addi_r0(576)))
+            ops.append((runtime["xfb_store"], 4, 0x60000000))
+
+        # Crucially, do NOT NOP the main field-base add here. The native
+        # PAL288DsScale mode uses VI=2*XFB, which enables the second field.
+        return ops, {
             "mode": mode,
             "already_ds": (mode["tv"] & 3) == 1,
             "target_height": target_height,
             "runtime": runtime,
-            "controlled_field_test": True,
-            "single_field_xfb": True,
+            "native_pal288_geometry": True,
+            "field_base_preserved": True,
+            "xfb_height": 288,
+            "vi_height": 576,
         }
 
     already_ds = (mode["tv"] & 3) == 1
