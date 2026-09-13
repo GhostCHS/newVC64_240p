@@ -30,6 +30,10 @@ def _encode_addi_r0(value: int) -> int:
     return (14 << 26) | (value & 0xFFFF)
 
 
+def _encode_subfic_r3_r0(value: int) -> int:
+    return (8 << 26) | (3 << 21) | (value & 0xFFFF)
+
+
 def _select_interlaced_mode(modes, target_tv: str):
     """Select the base interlaced render mode for the requested TV family."""
     base = T.TV_BASE[target_tv]
@@ -147,23 +151,33 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
 
     if target_tv == "PAL" and target_height == 288:
         runtime = inspect_pal_runtime(emu, mode["off"])
-        vfilter_ops = [
-            (mode["off"] + 0x32 + i, 1, value)
-            for i, value in enumerate(T.PROG_VFILTER)
-        ]
+        if not runtime.get("present"):
+            raise RuntimeError("Could not locate the PAL runtime height override for this emulator build.")
+        if runtime["state"] in ("legacy-partial", "partial"):
+            raise RuntimeError("This WAD contains an older experimental PAL runtime patch. Repatch the original WAD.")
+
+        li_off = runtime["li_offset"]
+        calc_off = li_off + 0x3C
+        if _u32(emu, calc_off) != _encode_subfic_r3_r0(574):
+            raise RuntimeError("PAL runtime height calculation signature changed; refusing to patch blindly.")
+
         return [
             (mode["off"], 4, mode["tv"] | 1),
             (mode["off"] + 0x14, 4, 0),
             (main[0]["off"], 4, 0x60000000),
-            *vfilter_ops,
+            (li_off, 4, _encode_addi_r0(576)),
+            (calc_off, 4, _encode_subfic_r3_r0(576)),
         ], {
             "mode": mode,
             "already_ds": (mode["tv"] & 3) == 1,
             "target_height": target_height,
             "runtime": runtime,
-            "controlled_field_test": True,
+            "controlled_runtime_test": True,
+            "runtime_height": 576,
+            "runtime_xfb_height": 576,
+            "runtime_vi_height": 576,
             "single_field_xfb": True,
-            "progressive_vfilter": True,
+            "progressive_vfilter": False,
         }
 
     already_ds = (mode["tv"] & 3) == 1
