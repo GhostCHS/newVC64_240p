@@ -31,13 +31,7 @@ def _encode_addi_r0(value: int) -> int:
 
 
 def _select_interlaced_mode(modes, target_tv: str):
-    """Select the base interlaced render mode for the requested TV family.
-
-    Some VC builds contain multiple PAL/NTSC render entries, including a
-    progressive PAL entry. Never pick a progressive entry just because it is
-    the first match in the binary. Prefer the canonical interlaced entry and
-    fall back to the first matching interlaced-sized entry only if necessary.
-    """
+    """Select the base interlaced render mode for the requested TV family."""
     base = T.TV_BASE[target_tv]
     exact = [m for m in modes if m["tv"] == base and (m["tv"] & 3) == 0]
     if exact:
@@ -56,24 +50,12 @@ def _select_interlaced_mode(modes, target_tv: str):
 
 
 def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
-    """Locate a PAL runtime height override, if this emulator build has one.
-
-    The known PAL VC family loads 574 at runtime and stores it into both the
-    XFB-height field (+8) and VI-height field (+16). For a custom PAL
-    double-strike mode we must keep the XFB at 574 while the VI height is the
-    requested 240/288 value. The runtime VI-height stores are therefore the
-    instructions that must be disabled; the 574 XFB store must remain active.
-
-    Some builds have no such runtime override. Absence is a valid state.
-    """
+    """Locate a PAL runtime height override for diagnostics only."""
     dol = T.Dol(emu)
     pal_va = dol.f2v(pal_mode_off)
     if pal_va is None:
-        return {
-            "ok": False,
-            "present": False,
-            "reason": "Could not map the PAL render mode to a runtime address.",
-        }
+        return {"ok": False, "present": False,
+                "reason": "Could not map the PAL render mode to a runtime address."}
 
     target_hi = (pal_va >> 16) & 0xFFFF
     target_lo = pal_va & 0xFFFF
@@ -135,22 +117,17 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
                 "state": state,
             }
 
-    return {
-        "ok": True,
-        "present": False,
-        "reason": "No PAL runtime height override found in this emulator build.",
-        "pal_va": pal_va,
-    }
+    return {"ok": True, "present": False,
+            "reason": "No PAL runtime height override found in this emulator build.",
+            "pal_va": pal_va}
 
 
 def build_video_ops(emu: bytes, target_tv: str, target_height: int):
-    """Return patch operations and metadata for the selected CRT mode.
+    """Return patch operations for the selected CRT mode.
 
-    Supported combinations:
-      NTSC + 240 = 240p/60 Hz
-      NTSC + 288 = experimental 288p/60 Hz
-      PAL  + 240 = experimental 240p/50 Hz
-      PAL  + 288 = experimental 288p/50 Hz
+    PAL 288p is currently a controlled one-change experiment: only the
+    PAL_INT -> PAL_DS render-mode flag is changed. Every other PAL value is
+    deliberately left untouched until the effect of PAL_DS alone is known.
     """
     if target_tv not in ("NTSC", "PAL"):
         raise ValueError(f"Unsupported target TV mode: {target_tv}")
@@ -161,6 +138,16 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     mode = _select_interlaced_mode(modes, target_tv)
     if mode is None:
         raise RuntimeError(f"Could not locate the {target_tv} interlaced render mode table entry.")
+
+    if target_tv == "PAL" and target_height == 288:
+        runtime = inspect_pal_runtime(emu, mode["off"])
+        return [(mode["off"], 4, mode["tv"] | 1)], {
+            "mode": mode,
+            "already_ds": (mode["tv"] & 3) == 1,
+            "target_height": target_height,
+            "runtime": runtime,
+            "single_change_test": True,
+        }
 
     dol = T.Dol(emu)
     adds = T.find_field_adds(emu, dol)
@@ -182,10 +169,6 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     if target_tv == "PAL":
         runtime = inspect_pal_runtime(emu, mode["off"])
         if runtime.get("present"):
-            # Keep the PAL runtime XFB height at 574. That is the full PAL
-            # active-line buffer. Disable only the runtime VI-height writes so
-            # the table's patched 240/288 value survives. This mirrors the
-            # NTSC patch's custom DF relationship (480 XFB -> 240 VI).
             if runtime["state"] == "legacy-partial":
                 raise RuntimeError(
                     "This WAD contains the older experimental PAL runtime patch "
@@ -195,8 +178,6 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
                 if _u32(emu, off) != 0x60000000:
                     ops.append((off, 4, 0x60000000))
 
-    # Remove the one-line field-base offset that causes even/odd line
-    # alternation and heavy flicker in the low-resolution output.
     ops.append((main[0]["off"], 4, 0x60000000))
 
     return ops, {
