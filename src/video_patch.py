@@ -125,9 +125,9 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
 def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     """Return patch operations for the selected CRT mode.
 
-    PAL 288p is currently a controlled one-change experiment: only the
-    PAL_INT -> PAL_DS render-mode flag is changed. Every other PAL value is
-    deliberately left untouched until the effect of PAL_DS alone is known.
+    PAL 288p is currently a controlled two-change experiment: PAL_INT ->
+    PAL_DS plus the established main VI field-base NOP. Every other PAL value
+    is deliberately left untouched.
     """
     if target_tv not in ("NTSC", "PAL"):
         raise ValueError(f"Unsupported target TV mode: {target_tv}")
@@ -139,21 +139,25 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     if mode is None:
         raise RuntimeError(f"Could not locate the {target_tv} interlaced render mode table entry.")
 
-    if target_tv == "PAL" and target_height == 288:
-        runtime = inspect_pal_runtime(emu, mode["off"])
-        return [(mode["off"], 4, mode["tv"] | 1)], {
-            "mode": mode,
-            "already_ds": (mode["tv"] & 3) == 1,
-            "target_height": target_height,
-            "runtime": runtime,
-            "single_change_test": True,
-        }
-
     dol = T.Dol(emu)
     adds = T.find_field_adds(emu, dol)
     main = [h for h in adds if h["field"] == 0x30]
     if not main:
         raise RuntimeError("Could not locate the main VI field-offset instruction.")
+
+    if target_tv == "PAL" and target_height == 288:
+        runtime = inspect_pal_runtime(emu, mode["off"])
+        return [
+            (mode["off"], 4, mode["tv"] | 1),
+            (main[0]["off"], 4, 0x60000000),
+        ], {
+            "mode": mode,
+            "already_ds": (mode["tv"] & 3) == 1,
+            "target_height": target_height,
+            "runtime": runtime,
+            "single_change_test": False,
+            "controlled_field_test": True,
+        }
 
     already_ds = (mode["tv"] & 3) == 1
     ops = []
