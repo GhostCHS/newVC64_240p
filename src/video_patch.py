@@ -125,9 +125,9 @@ def inspect_pal_runtime(emu: bytes, pal_mode_off: int):
 def build_video_ops(emu: bytes, target_tv: str, target_height: int):
     """Return patch operations for the selected CRT mode.
 
-    PAL 288p is currently a controlled two-change experiment: PAL_INT ->
-    PAL_DS plus the established main VI field-base NOP. Every other PAL value
-    is deliberately left untouched.
+    PAL 288p is a controlled experiment. The current test keeps the
+    emulator's PAL framebuffer geometry untouched and changes only the
+    display-mode/field handling needed to produce stable low-resolution output.
     """
     if target_tv not in ("NTSC", "PAL"):
         raise ValueError(f"Unsupported target TV mode: {target_tv}")
@@ -149,14 +149,15 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
         runtime = inspect_pal_runtime(emu, mode["off"])
         return [
             (mode["off"], 4, mode["tv"] | 1),
+            (mode["off"] + 0x14, 4, 0),
             (main[0]["off"], 4, 0x60000000),
         ], {
             "mode": mode,
             "already_ds": (mode["tv"] & 3) == 1,
             "target_height": target_height,
             "runtime": runtime,
-            "single_change_test": False,
             "controlled_field_test": True,
+            "single_field_xfb": True,
         }
 
     already_ds = (mode["tv"] & 3) == 1
