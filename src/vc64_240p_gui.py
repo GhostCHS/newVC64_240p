@@ -426,11 +426,18 @@ class Gui:
                 ))
                 if target_tv == "PAL":
                     runtime = meta.get("runtime") or {}
-                    self.q.put((
-                        "log",
-                        f"   PAL runtime height: {runtime.get('current_height', '?')} -> {target_height}; "
-                        "runtime XFB height store disabled",
-                    ))
+                    if meta.get("native_pal288_geometry"):
+                        self.q.put((
+                            "log",
+                            f"   PAL 288 runtime: VI 574 -> 576, XFB 574 store disabled; "
+                            "static XFB=288, field-base preserved",
+                        ))
+                    else:
+                        self.q.put((
+                            "log",
+                            f"   PAL runtime height: {runtime.get('current_height', '?')} -> {target_height}; "
+                            "runtime XFB height store disabled",
+                        ))
             except RuntimeError as exc:
                 self.q.put(("log", f"   {target_label} patch unavailable: {exc}"))
 
