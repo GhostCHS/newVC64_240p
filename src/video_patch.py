@@ -147,10 +147,15 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
 
     if target_tv == "PAL" and target_height == 288:
         runtime = inspect_pal_runtime(emu, mode["off"])
+        vfilter_ops = [
+            (mode["off"] + 0x32 + i, 1, value)
+            for i, value in enumerate(T.PROG_VFILTER)
+        ]
         return [
             (mode["off"], 4, mode["tv"] | 1),
             (mode["off"] + 0x14, 4, 0),
             (main[0]["off"], 4, 0x60000000),
+            *vfilter_ops,
         ], {
             "mode": mode,
             "already_ds": (mode["tv"] & 3) == 1,
@@ -158,6 +163,7 @@ def build_video_ops(emu: bytes, target_tv: str, target_height: int):
             "runtime": runtime,
             "controlled_field_test": True,
             "single_field_xfb": True,
+            "progressive_vfilter": True,
         }
 
     already_ds = (mode["tv"] & 3) == 1
